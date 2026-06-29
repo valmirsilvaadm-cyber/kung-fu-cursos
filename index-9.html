@@ -1,0 +1,2075 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="theme-color" content="#0f172a">
+<meta name="description" content="Kung Fu Cursos Online — Painel Administrativo">
+<title>Kung Fu Cursos Online</title>
+<link rel="manifest" href="manifest.json">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
+<!-- Firebase SDK -->
+<script type="module">
+import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js';
+import { getAuth, signInWithEmailAndPassword, signOut, onAuthStateChanged } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js';
+import { getFirestore, collection, addDoc, getDocs, doc, updateDoc, deleteDoc, onSnapshot, query, orderBy, serverTimestamp } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js';
+
+// ── CONFIGURAÇÃO FIREBASE ──
+const firebaseConfig = {
+  apiKey: "AIzaSyCIM7WkISnpvki8wwUmHxkxxd-WCaYXnJo",
+  authDomain: "kung-fu-cursos-online.firebaseapp.com",
+  projectId: "kung-fu-cursos-online",
+  storageBucket: "kung-fu-cursos-online.firebasestorage.app",
+  messagingSenderId: "706140417900",
+  appId: "1:706140417900:web:f30f7de86b917ab89a4d49",
+  measurementId: "G-V5HXXMTGLP"
+};
+
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+
+// ── Expor globalmente para uso nas funções ──
+window._fb = { auth, db, signInWithEmailAndPassword, signOut, onAuthStateChanged,
+  collection, addDoc, getDocs, doc, updateDoc, deleteDoc, onSnapshot, query, orderBy, serverTimestamp };
+
+// ── OBSERVADOR DE SESSÃO ──
+onAuthStateChanged(auth, user => {
+  if(user){
+    // Verifica se é admin
+    const meta = user.email;
+    document.getElementById('login-screen').style.display = 'none';
+    document.getElementById('app').style.display = 'block';
+    document.getElementById('admin-email-display').textContent = user.email;
+    renderAll();
+    loadCursosFirebase();
+    loadAlunosFirebase();
+    loadLogsFirebase();
+    loadAulasFirebase();
+    loadQuizzesFirebase();
+    popularSelectsCursos();
+    addLog('LOGIN', 'Sistema', user.email);
+  } else {
+    document.getElementById('app').style.display = 'none';
+    document.getElementById('login-screen').style.display = 'flex';
+  }
+});
+
+// ── LOGIN REAL ──
+window.doLogin = async function(){
+  const e = document.getElementById('login-email').value.trim();
+  const p = document.getElementById('login-pass').value;
+  if(!e || !p){ showToast('⚠️','Preencha os campos'); return; }
+  const btn = document.querySelector('.btn-primary');
+  btn.textContent = 'Entrando...'; btn.disabled = true;
+  try {
+    await signInWithEmailAndPassword(auth, e, p);
+  } catch(err){
+    btn.textContent = 'Entrar no sistema'; btn.disabled = false;
+    const msgs = {
+      'auth/user-not-found': 'Usuário não encontrado.',
+      'auth/wrong-password': 'Senha incorreta.',
+      'auth/invalid-email': 'E-mail inválido.',
+      'auth/too-many-requests': 'Muitas tentativas. Tente mais tarde.',
+      'auth/invalid-credential': 'E-mail ou senha incorretos.'
+    };
+    showToast('❌', msgs[err.code] || 'Erro ao fazer login.');
+  }
+}
+
+// ── LOGOUT REAL ──
+window.doLogout = async function(){
+  const { auth: a, signOut: so } = window._fb;
+  await so(a);
+  addLog('LOGOUT','Sistema', auth.currentUser?.email || '');
+}
+
+// ── CARREGAR CURSOS DO FIRESTORE ──
+window.loadCursosFirebase = async function(){
+  try {
+    const snap = await getDocs(collection(db,'cursos'));
+    const cursos = [];
+    snap.forEach(d => cursos.push({id:d.id,...d.data()}));
+    if(cursos.length === 0) return; // mantém dados de demo se vazio
+    const ct = document.getElementById('cursos-table');
+    if(ct) ct.innerHTML = cursos.map(c=>`
+      <tr>
+        <td><strong>${c.titulo||''}</strong></td>
+        <td>${c.modulos||0}</td>
+        <td>${c.alunos||0}</td>
+        <td style="color:var(--green);font-weight:600">R$${c.preco||'0,00'}</td>
+        <td><span class="status-pill ${c.status||'active'}"><span class="dot"></span>${c.status==='active'?'Publicado':'Rascunho'}</span></td>
+        <td><div style="display:flex;gap:6px">
+          <button class="btn-sm btn-ghost" style="padding:5px 10px;font-size:12px" onclick="editCurso('${c.id}')">Editar</button>
+          <button class="btn-sm" style="background:rgba(239,68,68,.15);color:var(--red);border:none;padding:5px 10px;font-size:12px;border-radius:6px;cursor:pointer" onclick="deleteCurso('${c.id}')">Excluir</button>
+        </div></td>
+      </tr>`).join('');
+  } catch(e){ console.error('Erro ao carregar cursos:',e); }
+}
+
+// ── SALVAR CURSO NO FIRESTORE ──
+window.salvarCursoFirebase = async function(){
+  const titulo = document.getElementById('curso-titulo').value.trim();
+  const categoria = document.getElementById('curso-categoria').value;
+  const preco = document.getElementById('curso-preco').value;
+  const descricao = document.getElementById('curso-descricao').value.trim();
+  const nivel = document.getElementById('curso-nivel').value;
+  const status = document.getElementById('curso-status').value === 'Publicado' ? 'active' : 'inactive';
+  const videoUrl = document.getElementById('video-url-input')?.value.trim() || '';
+
+  if(!titulo){ showToast('⚠️','Digite o título do curso'); return; }
+  try {
+    await addDoc(collection(db,'cursos'), {
+      titulo, categoria, preco, descricao, nivel, status, videoUrl,
+      alunos: 0, modulos: 0,
+      criadoEm: serverTimestamp()
+    });
+    closeModal('modal-curso');
+    showToast('✅','Curso criado com sucesso!');
+    addLog('CRIAÇÃO', `Curso: ${titulo}`, auth.currentUser?.email);
+    loadCursosFirebase();
+  } catch(e){
+    showToast('❌','Erro ao salvar curso.');
+    console.error(e);
+  }
+}
+
+// ── EXCLUIR CURSO ──
+window.deleteCurso = async function(id){
+  if(!confirm('Excluir este curso?')) return;
+  await deleteDoc(doc(db,'cursos',id));
+  showToast('🗑️','Curso excluído!');
+  loadCursosFirebase();
+}
+
+// ── CARREGAR ALUNOS DO FIRESTORE ──
+window.loadAlunosFirebase = async function(){
+  try {
+    const snap = await getDocs(collection(db,'alunos'));
+    const alunos = [];
+    snap.forEach(d => alunos.push({id:d.id,...d.data()}));
+    if(alunos.length === 0) return;
+
+    // Atualiza stat card
+    document.querySelector('.stat-card.blue .stat-value').textContent = alunos.length;
+
+    const alt = document.getElementById('alunos-table');
+    if(alt) alt.innerHTML = alunos.map(a=>`
+      <tr>
+        <td><strong>${a.nome||''}</strong></td>
+        <td style="color:var(--text2)">${a.email||''}</td>
+        <td>${a.cursos||0}</td>
+        <td>${a.vencimento||'—'}</td>
+        <td><span class="status-pill ${a.status||'active'}"><span class="dot"></span>${a.status==='active'?'Ativo':a.status==='pending'?'Inadimplente':'Bloqueado'}</span></td>
+        <td><div style="display:flex;gap:4px">
+          <button class="btn-sm btn-ghost" style="padding:5px 9px;font-size:11px" onclick="showToast('✏️','Editando aluno...')">Editar</button>
+          <button class="btn-sm" style="background:rgba(245,158,11,.15);color:var(--yellow);border:none;padding:5px 9px;font-size:11px;border-radius:6px;cursor:pointer" onclick="bloquearAluno('${a.id}')">Bloquear</button>
+        </div></td>
+      </tr>`).join('');
+
+    // Atualiza matrículas recentes
+    const re = document.getElementById('recent-enrollments');
+    if(re) re.innerHTML = alunos.slice(-4).reverse().map(a=>`
+      <tr><td><strong>${a.nome}</strong></td><td>${a.curso||'—'}</td><td>${a.vencimento||'—'}</td>
+      <td><span class="status-pill ${a.status||'active'}"><span class="dot"></span>${a.status==='active'?'Ativo':'Pendente'}</span></td></tr>`).join('');
+  } catch(e){ console.error('Erro ao carregar alunos:',e); }
+}
+
+// ── CADASTRAR ALUNO NO FIRESTORE ──
+window.salvarAlunoFirebase = async function(){
+  const nome = document.getElementById('aluno-nome').value.trim();
+  const email = document.getElementById('aluno-email').value.trim();
+  const telefone = document.getElementById('aluno-tel').value.trim();
+  const curso = document.getElementById('aluno-curso').value;
+  const vencimento = document.getElementById('aluno-venc').value;
+  const desconto = document.getElementById('aluno-desc').value;
+
+  if(!nome||!email){ showToast('⚠️','Nome e e-mail são obrigatórios'); return; }
+  try {
+    await addDoc(collection(db,'alunos'),{
+      nome, email, telefone, curso, vencimento, desconto,
+      status:'active', cursos:1,
+      criadoEm: serverTimestamp()
+    });
+    closeModal('modal-aluno');
+    showToast('✅','Aluno cadastrado com sucesso!');
+    addLog('CRIAÇÃO',`Aluno: ${nome}`, auth.currentUser?.email);
+    loadAlunosFirebase();
+  } catch(e){
+    showToast('❌','Erro ao cadastrar aluno.');
+    console.error(e);
+  }
+}
+
+// ── BLOQUEAR ALUNO ──
+window.bloquearAluno = async function(id){
+  await updateDoc(doc(db,'alunos',id),{ status:'inactive' });
+  showToast('🔒','Aluno bloqueado!');
+  addLog('BLOQUEIO','Aluno', auth.currentUser?.email);
+  loadAlunosFirebase();
+}
+
+// ── LOGS DO SISTEMA ──
+window.addLog = async function(acao, recurso, usuario){
+  try {
+    await addDoc(collection(db,'logs'),{
+      acao, recurso,
+      usuario: usuario || 'Sistema',
+      ip: '---',
+      criadoEm: serverTimestamp(),
+      status: 'active'
+    });
+  } catch(e){}
+}
+
+window.loadLogsFirebase = async function(){
+  try {
+    const snap = await getDocs(query(collection(db,'logs'), orderBy('criadoEm','desc')));
+    const logs = [];
+    snap.forEach(d => logs.push({id:d.id,...d.data()}));
+    if(logs.length === 0) return;
+    const lt = document.getElementById('logs-table');
+    if(lt) lt.innerHTML = logs.slice(0,20).map(l=>{
+      const ts = l.criadoEm?.toDate ? l.criadoEm.toDate().toLocaleTimeString('pt-BR') : '—';
+      return `<tr>
+        <td style="font-family:monospace;font-size:12px;color:var(--text3)">${ts}</td>
+        <td><strong>${l.usuario||'—'}</strong></td>
+        <td><span class="tag ${l.acao==='LOGIN'?'admin':l.acao==='BLOQUEIO'||l.acao==='EXCLUSÃO'?'blocked':'student'}">${l.acao}</span></td>
+        <td style="font-size:13px">${l.recurso||'—'}</td>
+        <td style="font-family:monospace;font-size:12px;color:var(--text3)">${l.ip}</td>
+        <td><span class="status-pill active"><span class="dot"></span>OK</span></td>
+      </tr>`;
+    }).join('');
+  } catch(e){ console.error('Erro ao carregar logs:',e); }
+}
+
+// ── SALVAR CUPOM NO FIRESTORE ──
+window.salvarCupomFirebase = async function(){
+  const code = document.getElementById('cupom-code').value.trim().toUpperCase();
+  const tipo = document.getElementById('cupom-tipo').value;
+  const valor = document.getElementById('cupom-valor').value;
+  const limite = document.getElementById('cupom-limite').value;
+  const validade = document.getElementById('cupom-validade').value;
+  if(!code){ showToast('⚠️','Digite o código do cupom'); return; }
+  try {
+    await addDoc(collection(db,'cupons'),{
+      code, tipo, valor, limite, validade,
+      usos: 0, status:'active',
+      criadoEm: serverTimestamp()
+    });
+    closeModal('modal-cupom');
+    showToast('🏷️','Cupom criado com sucesso!');
+    addLog('CRIAÇÃO',`Cupom: ${code}`, auth.currentUser?.email);
+  } catch(e){
+    showToast('❌','Erro ao criar cupom.'); console.error(e);
+  }
+}
+
+console.log('🔥 Firebase conectado — Kung Fu Cursos Online');
+</script>
+<style>
+:root {
+  --bg: #0a0f1e;
+  --surface: #111827;
+  --surface2: #1a2235;
+  --surface3: #232f45;
+  --border: #1e2d45;
+  --accent: #3b82f6;
+  --accent2: #6366f1;
+  --green: #10b981;
+  --yellow: #f59e0b;
+  --red: #ef4444;
+  --purple: #8b5cf6;
+  --cyan: #06b6d4;
+  --text: #f1f5f9;
+  --text2: #94a3b8;
+  --text3: #64748b;
+  --radius: 12px;
+  --radius-sm: 8px;
+  --sidebar: 260px;
+  --font-display: 'Space Grotesk', sans-serif;
+  --font-body: 'Inter', sans-serif;
+}
+*{margin:0;padding:0;box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{font-family:var(--font-body);background:var(--bg);color:var(--text);min-height:100vh;overflow-x:hidden}
+
+/* ── LOGIN ── */
+#login-screen{
+  display:flex;align-items:center;justify-content:center;
+  min-height:100vh;background:var(--bg);
+  background-image:radial-gradient(ellipse at 20% 50%,rgba(59,130,246,.15) 0%,transparent 60%),
+                   radial-gradient(ellipse at 80% 20%,rgba(99,102,241,.12) 0%,transparent 50%);
+}
+.login-card{
+  background:var(--surface);border:1px solid var(--border);
+  border-radius:20px;padding:48px;width:100%;max-width:420px;
+  box-shadow:0 25px 50px rgba(0,0,0,.5);
+}
+.login-logo{
+  display:flex;align-items:center;gap:12px;margin-bottom:32px;justify-content:center;
+}
+.login-logo svg{width:40px;height:40px}
+.login-logo span{font-family:var(--font-display);font-size:22px;font-weight:700;color:var(--text)}
+.login-title{font-family:var(--font-display);font-size:26px;font-weight:700;text-align:center;margin-bottom:6px}
+.login-sub{text-align:center;color:var(--text2);font-size:14px;margin-bottom:32px}
+.form-group{margin-bottom:18px}
+.form-group label{display:block;font-size:13px;font-weight:500;color:var(--text2);margin-bottom:6px}
+.form-group input{
+  width:100%;background:var(--surface2);border:1px solid var(--border);
+  border-radius:var(--radius-sm);padding:12px 16px;color:var(--text);font-size:15px;
+  outline:none;transition:.2s;font-family:var(--font-body);
+}
+.form-group input:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(59,130,246,.15)}
+.btn-primary{
+  width:100%;background:linear-gradient(135deg,var(--accent),var(--accent2));
+  border:none;border-radius:var(--radius-sm);padding:13px;color:#fff;
+  font-size:15px;font-weight:600;cursor:pointer;transition:.2s;font-family:var(--font-body);
+}
+.btn-primary:hover{opacity:.9;transform:translateY(-1px)}
+.login-badge{
+  display:flex;align-items:center;gap:8px;background:rgba(16,185,129,.1);
+  border:1px solid rgba(16,185,129,.3);border-radius:8px;padding:10px 14px;
+  margin-top:24px;font-size:13px;color:#10b981;
+}
+
+/* ── LAYOUT ── */
+#app{display:none;min-height:100vh}
+.sidebar{
+  position:fixed;top:0;left:0;width:var(--sidebar);height:100vh;
+  background:var(--surface);border-right:1px solid var(--border);
+  display:flex;flex-direction:column;z-index:100;overflow-y:auto;
+  scrollbar-width:thin;scrollbar-color:var(--border) transparent;
+}
+.sidebar-logo{
+  padding:20px 20px 16px;display:flex;align-items:center;gap:10px;
+  border-bottom:1px solid var(--border);
+}
+.sidebar-logo svg{width:32px;height:32px;flex-shrink:0}
+.sidebar-logo span{font-family:var(--font-display);font-size:18px;font-weight:700}
+.sidebar-logo .badge{
+  background:linear-gradient(135deg,var(--accent),var(--accent2));
+  color:#fff;font-size:9px;font-weight:700;padding:2px 6px;border-radius:4px;
+  text-transform:uppercase;letter-spacing:.5px;
+}
+.sidebar-section{padding:20px 12px 8px;font-size:10px;font-weight:600;
+  color:var(--text3);text-transform:uppercase;letter-spacing:1px}
+.nav-item{
+  display:flex;align-items:center;gap:10px;padding:10px 14px;
+  border-radius:var(--radius-sm);cursor:pointer;transition:.15s;
+  font-size:13.5px;font-weight:500;color:var(--text2);margin:1px 8px;
+}
+.nav-item:hover{background:var(--surface2);color:var(--text)}
+.nav-item.active{background:linear-gradient(135deg,rgba(59,130,246,.2),rgba(99,102,241,.15));
+  color:var(--accent);border:1px solid rgba(59,130,246,.2)}
+.nav-item .icon{width:18px;height:18px;flex-shrink:0}
+.nav-badge{margin-left:auto;background:var(--red);color:#fff;
+  font-size:10px;font-weight:700;padding:2px 6px;border-radius:20px}
+
+.main{margin-left:var(--sidebar);padding:28px 32px;min-height:100vh}
+.topbar{
+  display:flex;align-items:center;justify-content:space-between;
+  margin-bottom:28px;
+}
+.page-title{font-family:var(--font-display);font-size:24px;font-weight:700}
+.page-sub{font-size:13px;color:var(--text2);margin-top:2px}
+.topbar-actions{display:flex;align-items:center;gap:12px}
+.btn-sm{
+  display:flex;align-items:center;gap:7px;padding:9px 16px;
+  border-radius:var(--radius-sm);font-size:13px;font-weight:500;cursor:pointer;
+  border:none;transition:.2s;font-family:var(--font-body);
+}
+.btn-accent{background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff}
+.btn-ghost{background:var(--surface2);border:1px solid var(--border);color:var(--text2)}
+.btn-ghost:hover{border-color:var(--accent);color:var(--text)}
+.avatar{
+  width:36px;height:36px;border-radius:50%;
+  background:linear-gradient(135deg,var(--accent),var(--accent2));
+  display:flex;align-items:center;justify-content:center;
+  font-weight:700;font-size:14px;cursor:pointer;
+}
+
+/* ── CARDS ── */
+.stats-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:16px;margin-bottom:24px}
+.stat-card{
+  background:var(--surface);border:1px solid var(--border);
+  border-radius:var(--radius);padding:20px;position:relative;overflow:hidden;
+}
+.stat-card::before{
+  content:'';position:absolute;top:0;right:0;width:60px;height:60px;
+  border-radius:0 var(--radius) 0 60px;opacity:.4;
+}
+.stat-card.blue::before{background:var(--accent)}
+.stat-card.green::before{background:var(--green)}
+.stat-card.purple::before{background:var(--purple)}
+.stat-card.yellow::before{background:var(--yellow)}
+.stat-label{font-size:12px;color:var(--text2);font-weight:500;margin-bottom:8px}
+.stat-value{font-family:var(--font-display);font-size:28px;font-weight:700}
+.stat-change{font-size:12px;margin-top:6px;display:flex;align-items:center;gap:4px}
+.stat-change.up{color:var(--green)}.stat-change.down{color:var(--red)}
+
+.grid-2{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:24px}
+.grid-3{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-bottom:24px}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:20px}
+.card-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px}
+.card-title{font-family:var(--font-display);font-size:15px;font-weight:600}
+.card-action{font-size:12px;color:var(--accent);cursor:pointer;font-weight:500}
+
+/* ── TABLE ── */
+.table-wrap{overflow-x:auto}
+table{width:100%;border-collapse:collapse}
+th{padding:10px 14px;text-align:left;font-size:11px;font-weight:600;
+   color:var(--text3);text-transform:uppercase;letter-spacing:.5px;
+   border-bottom:1px solid var(--border)}
+td{padding:12px 14px;font-size:13.5px;border-bottom:1px solid rgba(30,45,69,.5)}
+tr:last-child td{border-bottom:none}
+tr:hover td{background:rgba(255,255,255,.02)}
+.status-pill{
+  display:inline-flex;align-items:center;gap:5px;
+  padding:3px 10px;border-radius:20px;font-size:11px;font-weight:600;
+}
+.status-pill.active{background:rgba(16,185,129,.15);color:var(--green)}
+.status-pill.inactive{background:rgba(239,68,68,.15);color:var(--red)}
+.status-pill.pending{background:rgba(245,158,11,.15);color:var(--yellow)}
+.dot{width:6px;height:6px;border-radius:50%;background:currentColor}
+
+/* ── PROGRESS ── */
+.progress-bar{height:6px;background:var(--border);border-radius:3px;overflow:hidden;margin-top:4px}
+.progress-fill{height:100%;border-radius:3px;transition:width .6s ease}
+.progress-fill.blue{background:linear-gradient(90deg,var(--accent),var(--cyan))}
+.progress-fill.green{background:var(--green)}
+.progress-fill.purple{background:var(--purple)}
+
+/* ── AI CHAT ── */
+.ai-chat{
+  background:var(--surface);border:1px solid var(--border);
+  border-radius:var(--radius);overflow:hidden;display:flex;flex-direction:column;
+  height:420px;
+}
+.ai-header{
+  padding:14px 20px;border-bottom:1px solid var(--border);
+  display:flex;align-items:center;gap:10px;
+}
+.ai-dot{width:8px;height:8px;border-radius:50%;background:var(--green);box-shadow:0 0 6px var(--green)}
+.ai-messages{flex:1;overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:10px}
+.msg{max-width:85%;padding:10px 14px;border-radius:12px;font-size:13.5px;line-height:1.5}
+.msg.user{
+  background:linear-gradient(135deg,var(--accent),var(--accent2));
+  color:#fff;align-self:flex-end;border-bottom-right-radius:4px;
+}
+.msg.ai{
+  background:var(--surface2);border:1px solid var(--border);
+  color:var(--text);align-self:flex-start;border-bottom-left-radius:4px;
+}
+.ai-input-row{
+  padding:12px;border-top:1px solid var(--border);
+  display:flex;gap:8px;
+}
+.ai-input{
+  flex:1;background:var(--surface2);border:1px solid var(--border);
+  border-radius:var(--radius-sm);padding:10px 14px;color:var(--text);font-size:13.5px;
+  outline:none;font-family:var(--font-body);transition:.2s;
+}
+.ai-input:focus{border-color:var(--accent)}
+.ai-send{
+  background:linear-gradient(135deg,var(--accent),var(--accent2));border:none;
+  border-radius:var(--radius-sm);padding:10px 16px;color:#fff;cursor:pointer;
+  font-size:13px;font-weight:600;transition:.2s;font-family:var(--font-body);
+}
+.ai-send:hover{opacity:.9}
+
+/* ── QUICK ACTIONS ── */
+.quick-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:24px}
+.quick-btn{
+  background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius);
+  padding:18px;cursor:pointer;transition:.2s;text-align:center;
+}
+.quick-btn:hover{border-color:var(--accent);background:rgba(59,130,246,.05);transform:translateY(-2px)}
+.quick-btn .qi{font-size:24px;margin-bottom:8px}
+.quick-btn .ql{font-size:12px;font-weight:500;color:var(--text2)}
+
+/* ── PAGES ── */
+.page{display:none}
+.page.active{display:block}
+
+/* ── MODAL ── */
+.modal-overlay{
+  display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);
+  z-index:1000;align-items:center;justify-content:center;
+  backdrop-filter:blur(4px);
+}
+.modal-overlay.open{display:flex}
+.modal{
+  background:var(--surface);border:1px solid var(--border);
+  border-radius:16px;padding:28px;width:100%;max-width:500px;
+  animation:slideUp .2s ease;
+}
+@keyframes slideUp{from{transform:translateY(20px);opacity:0}to{transform:translateY(0);opacity:1}}
+.modal-title{font-family:var(--font-display);font-size:18px;font-weight:700;margin-bottom:20px}
+.form-row{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+.input-field{
+  width:100%;background:var(--surface2);border:1px solid var(--border);
+  border-radius:var(--radius-sm);padding:10px 14px;color:var(--text);font-size:14px;
+  outline:none;font-family:var(--font-body);transition:.2s;
+}
+.input-field:focus{border-color:var(--accent)}
+select.input-field{cursor:pointer}
+.modal-actions{display:flex;gap:10px;justify-content:flex-end;margin-top:20px}
+
+/* ── CHART PLACEHOLDER ── */
+.chart-canvas{
+  background:var(--surface2);border-radius:var(--radius-sm);
+  padding:20px;margin-top:12px;position:relative;overflow:hidden;
+}
+.chart-bars{display:flex;align-items:flex-end;gap:8px;height:120px;padding-top:10px}
+.bar{
+  flex:1;border-radius:4px 4px 0 0;transition:opacity .2s;cursor:pointer;
+  background:linear-gradient(to top,var(--accent),var(--cyan));
+  opacity:.7;
+}
+.bar:hover{opacity:1}
+.chart-labels{display:flex;gap:8px;margin-top:6px}
+.chart-labels span{flex:1;text-align:center;font-size:10px;color:var(--text3)}
+
+/* ── TAGS/BADGES ── */
+.tag{
+  display:inline-block;padding:2px 8px;border-radius:4px;
+  font-size:11px;font-weight:600;
+}
+.tag.admin{background:rgba(139,92,246,.2);color:var(--purple)}
+.tag.student{background:rgba(59,130,246,.2);color:var(--accent)}
+.tag.blocked{background:rgba(239,68,68,.2);color:var(--red)}
+
+/* ── NOTIFICATION ── */
+.toast{
+  position:fixed;bottom:24px;right:24px;z-index:9999;
+  background:var(--surface);border:1px solid var(--green);
+  border-radius:var(--radius-sm);padding:14px 20px;
+  display:flex;align-items:center;gap:10px;
+  box-shadow:0 8px 24px rgba(0,0,0,.4);
+  transform:translateY(100px);opacity:0;transition:.3s;
+  max-width:320px;
+}
+.toast.show{transform:translateY(0);opacity:1}
+.toast-icon{font-size:18px}
+.toast-text{font-size:13.5px;font-weight:500}
+
+/* ── SIDEBAR FOOTER ── */
+.sidebar-footer{
+  margin-top:auto;padding:16px;border-top:1px solid var(--border);
+}
+.user-info{display:flex;align-items:center;gap:10px}
+.user-avatar{
+  width:34px;height:34px;border-radius:50%;
+  background:linear-gradient(135deg,var(--accent),var(--purple));
+  display:flex;align-items:center;justify-content:center;font-weight:700;font-size:13px;
+}
+.user-name{font-size:13px;font-weight:600}
+.user-role{font-size:11px;color:var(--text3)}
+.logout-btn{
+  margin-left:auto;background:none;border:none;cursor:pointer;
+  color:var(--text3);font-size:18px;transition:.2s;padding:4px;
+}
+.logout-btn:hover{color:var(--red)}
+
+/* ── RESPONSIVE ── */
+@media(max-width:1200px){.stats-grid{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:900px){
+  .sidebar{transform:translateX(-100%);transition:.3s}
+  .sidebar.open{transform:translateX(0)}
+  .main{margin-left:0;padding:20px 16px}
+  .grid-2,.grid-3{grid-template-columns:1fr}
+  .quick-grid{grid-template-columns:repeat(2,1fr)}
+  .stats-grid{grid-template-columns:1fr}
+}
+
+/* ── SCROLLBAR ── */
+::-webkit-scrollbar{width:6px;height:6px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
+::-webkit-scrollbar-thumb:hover{background:var(--text3)}
+
+/* ── REPORT CARDS ── */
+.report-item{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:14px 0;border-bottom:1px solid rgba(30,45,69,.5);
+}
+.report-item:last-child{border-bottom:none}
+.report-icon{
+  width:38px;height:38px;border-radius:var(--radius-sm);
+  display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0;
+}
+.report-btn{
+  display:flex;align-items:center;gap:6px;padding:7px 12px;
+  border-radius:6px;font-size:12px;font-weight:600;cursor:pointer;border:none;
+  transition:.2s;font-family:var(--font-body);
+}
+.report-btn.pdf{background:rgba(239,68,68,.15);color:var(--red)}
+.report-btn.xls{background:rgba(16,185,129,.15);color:var(--green)}
+
+/* ── PERMISSIONS GRID ── */
+.perm-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:12px}
+.perm-item{
+  display:flex;align-items:center;gap:8px;padding:8px 10px;
+  background:var(--surface2);border-radius:6px;font-size:12px;
+}
+.toggle{
+  position:relative;width:32px;height:18px;flex-shrink:0;cursor:pointer;
+}
+.toggle input{opacity:0;width:0;height:0;position:absolute}
+.slider{
+  position:absolute;inset:0;background:var(--border);border-radius:9px;
+  transition:.2s;
+}
+.slider::before{
+  content:'';position:absolute;width:12px;height:12px;
+  left:3px;top:3px;background:#fff;border-radius:50%;transition:.2s;
+}
+.toggle input:checked + .slider{background:var(--accent)}
+.toggle input:checked + .slider::before{transform:translateX(14px)}
+
+/* ── LOADING ── */
+.skeleton{
+  background:linear-gradient(90deg,var(--surface2) 25%,var(--surface3) 50%,var(--surface2) 75%);
+  background-size:200% 100%;animation:shimmer 1.5s infinite;border-radius:6px;
+}
+@keyframes shimmer{0%{background-position:200% 0}100%{background-position:-200% 0}}
+
+.hamburger{
+  display:none;background:none;border:none;cursor:pointer;
+  color:var(--text);font-size:22px;padding:4px;
+}
+@media(max-width:900px){.hamburger{display:block}}
+</style>
+</head>
+<body>
+
+<!-- LOGIN -->
+<div id="login-screen">
+  <div class="login-card">
+    <div class="login-logo">
+      <img src="logo.svg"
+           alt="Kung Fu Cursos Online"
+           style="width:52px;height:52px;border-radius:12px;object-fit:cover;box-shadow:0 0 16px rgba(0,120,255,.5)">
+      <div>
+        <div style="font-family:var(--font-display);font-size:17px;font-weight:700;line-height:1.2">Kung Fu Cursos</div>
+        <div style="font-size:11px;color:var(--text2);font-weight:500;letter-spacing:.5px">ONLINE</div>
+      </div>
+    </div>
+    <h1 class="login-title">Bem-vindo de volta</h1>
+    <p class="login-sub">Acesso restrito — Painel Administrativo</p>
+    <div class="form-group">
+      <label>E-mail</label>
+      <input type="email" id="login-email" placeholder="admin@kungfucursos.com.br" value="admin@kungfucursos.com.br">
+    </div>
+    <div class="form-group">
+      <label>Senha</label>
+      <input type="password" id="login-pass" placeholder="••••••••" value="admin123">
+    </div>
+    <button class="btn-primary" onclick="doLogin()">Entrar no sistema</button>
+    <div class="login-badge">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+      Conexão segura com criptografia de ponta a ponta
+    </div>
+  </div>
+</div>
+
+<!-- APP -->
+<div id="app">
+  <!-- SIDEBAR -->
+  <nav class="sidebar" id="sidebar">
+    <div class="sidebar-logo">
+      <img src="logo.svg"
+           alt="Logo"
+           style="width:32px;height:32px;border-radius:8px;object-fit:cover;flex-shrink:0;box-shadow:0 0 10px rgba(0,120,255,.5)">
+      <div style="line-height:1.2;overflow:hidden">
+        <div style="font-family:var(--font-display);font-size:13px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">Kung Fu Cursos</div>
+        <div style="font-size:10px;color:var(--text3);letter-spacing:.5px;font-weight:500">ONLINE</div>
+      </div>
+      <span class="badge" style="margin-left:auto;flex-shrink:0">ADM</span>
+    </div>
+
+    <div class="sidebar-section">Principal</div>
+    <div class="nav-item active" onclick="showPage('dashboard',this)">
+      <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/></svg>
+      Dashboard
+    </div>
+
+    <div class="sidebar-section">Conteúdo</div>
+    <div class="nav-item" onclick="showPage('cursos',this)">
+      <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>
+      Cursos
+    </div>
+    <div class="nav-item" onclick="showPage('aulas',this)">
+      <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2"/></svg>
+      Aulas & Vídeos
+    </div>
+    <div class="nav-item" onclick="showPage('quizzes',this)">
+      <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+      Quizzes
+    </div>
+
+    <div class="sidebar-section">Alunos</div>
+    <div class="nav-item" onclick="showPage('alunos',this)">
+      <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+      Gerenciar Alunos
+      <span class="nav-badge">3</span>
+    </div>
+    <div class="nav-item" onclick="showPage('gamificacao',this)">
+      <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
+      Gamificação
+    </div>
+
+    <div class="sidebar-section">Financeiro</div>
+    <div class="nav-item" onclick="showPage('pagamentos',this)">
+      <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="1" y="4" width="22" height="16" rx="2"/><line x1="1" y1="10" x2="23" y2="10"/></svg>
+      Pagamentos
+    </div>
+    <div class="nav-item" onclick="showPage('cupons',this)">
+      <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><line x1="7" y1="7" x2="7.01" y2="7"/></svg>
+      Cupons & Promoções
+    </div>
+
+    <div class="sidebar-section">Análise</div>
+    <div class="nav-item" onclick="showPage('relatorios',this)">
+      <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
+      Relatórios
+    </div>
+    <div class="nav-item" onclick="showPage('ia',this)">
+      <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2a10 10 0 1 0 10 10"/><path d="M12 6v6l4 2"/><circle cx="19" cy="5" r="3" fill="#6366f1" stroke="none"/></svg>
+      IA Integrada
+    </div>
+
+    <div class="sidebar-section">Sistema</div>
+    <div class="nav-item" onclick="showPage('admins',this)">
+      <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+      Administradores
+    </div>
+    <div class="nav-item" onclick="showPage('logs',this)">
+      <svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+      Logs do Sistema
+    </div>
+
+    <div class="sidebar-footer">
+      <div class="user-info">
+        <div class="user-avatar">AD</div>
+        <div>
+          <div class="user-name">Administrador</div>
+          <div class="user-role" id="admin-email-display">Super Admin</div>
+        </div>
+        <button class="logout-btn" onclick="doLogout()" title="Sair">⏻</button>
+      </div>
+    </div>
+  </nav>
+
+  <!-- MAIN CONTENT -->
+  <main class="main">
+    <div class="topbar">
+      <div>
+        <button class="hamburger" onclick="toggleSidebar()">☰</button>
+        <div class="page-title" id="page-title">Dashboard</div>
+        <div class="page-sub" id="page-sub">Visão geral do sistema</div>
+      </div>
+      <div class="topbar-actions">
+        <button class="btn-sm btn-ghost" onclick="showToast('🔔','Nenhuma notificação pendente')">
+          🔔
+        </button>
+        <button class="btn-sm btn-accent" onclick="openModal('modal-notif')">
+          📣 Notificar Alunos
+        </button>
+        <div class="avatar" onclick="showToast('👤','Perfil do administrador')">AD</div>
+      </div>
+    </div>
+
+    <!-- DASHBOARD -->
+    <div class="page active" id="page-dashboard">
+      <div class="stats-grid">
+        <div class="stat-card blue">
+          <div class="stat-label">Total de Alunos</div>
+          <div class="stat-value">1.847</div>
+          <div class="stat-change up">▲ 12% este mês</div>
+        </div>
+        <div class="stat-card green">
+          <div class="stat-label">Receita Mensal</div>
+          <div class="stat-value">R$47.320</div>
+          <div class="stat-change up">▲ 8,4% vs mês anterior</div>
+        </div>
+        <div class="stat-card purple">
+          <div class="stat-label">Cursos Ativos</div>
+          <div class="stat-value">24</div>
+          <div class="stat-change up">▲ 3 novos este mês</div>
+        </div>
+        <div class="stat-card yellow">
+          <div class="stat-label">Taxa de Conclusão</div>
+          <div class="stat-value">73%</div>
+          <div class="stat-change down">▼ 2% vs mês anterior</div>
+        </div>
+      </div>
+
+      <div class="quick-grid">
+        <div class="quick-btn" onclick="openModal('modal-curso')">
+          <div class="qi">📚</div><div class="ql">Novo Curso</div>
+        </div>
+        <div class="quick-btn" onclick="openModal('modal-aluno')">
+          <div class="qi">👤</div><div class="ql">Cadastrar Aluno</div>
+        </div>
+        <div class="quick-btn" onclick="openModal('modal-cupom')">
+          <div class="qi">🏷️</div><div class="ql">Criar Cupom</div>
+        </div>
+        <div class="quick-btn" onclick="openModal('modal-notif')">
+          <div class="qi">📣</div><div class="ql">Enviar Notificação</div>
+        </div>
+      </div>
+
+      <div class="grid-2">
+        <div class="card">
+          <div class="card-header">
+            <span class="card-title">Receita Mensal 2025</span>
+            <span class="card-action" onclick="showPage('relatorios',null)">Ver relatório →</span>
+          </div>
+          <div class="chart-canvas">
+            <div class="chart-bars" id="chart-bars"></div>
+            <div class="chart-labels" id="chart-labels"></div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-header">
+            <span class="card-title">Cursos Mais Acessados</span>
+            <span class="card-action">Ver todos →</span>
+          </div>
+          <div id="top-courses"></div>
+        </div>
+      </div>
+
+      <div class="grid-2">
+        <div class="card">
+          <div class="card-header">
+            <span class="card-title">Últimas Matrículas</span>
+            <span class="card-action" onclick="showPage('alunos',null)">Ver todas →</span>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Aluno</th><th>Curso</th><th>Data</th><th>Status</th></tr></thead>
+              <tbody id="recent-enrollments"></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-header">
+            <span class="card-title">Alertas do Sistema</span>
+          </div>
+          <div id="alerts-list"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- CURSOS -->
+    <div class="page" id="page-cursos">
+      <div style="display:flex;gap:10px;margin-bottom:20px;flex-wrap:wrap">
+        <input class="input-field" style="max-width:280px" placeholder="🔍 Buscar curso...">
+        <select class="input-field" style="max-width:160px">
+          <option>Todos os status</option>
+          <option>Publicado</option>
+          <option>Rascunho</option>
+        </select>
+        <button class="btn-sm btn-accent" onclick="openModal('modal-curso')" style="margin-left:auto">+ Novo Curso</button>
+      </div>
+      <div class="card">
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Curso</th><th>Módulos</th><th>Alunos</th><th>Receita</th><th>Status</th><th>Ações</th></tr></thead>
+            <tbody id="cursos-table"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- AULAS -->
+    <div class="page" id="page-aulas">
+      <div style="display:flex;gap:10px;margin-bottom:20px;flex-wrap:wrap">
+        <input class="input-field" style="max-width:280px" placeholder="🔍 Buscar aula...">
+        <button class="btn-sm btn-accent" onclick="openModal('modal-aula');popularSelectsCursos()" style="margin-left:auto">+ Nova Aula</button>
+      </div>
+      <div class="card">
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Título</th><th>Curso</th><th>Duração</th><th>Visualizações</th><th>Material</th><th>Ações</th></tr></thead>
+            <tbody id="aulas-table"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- QUIZZES -->
+    <div class="page" id="page-quizzes">
+      <div style="display:flex;gap:10px;margin-bottom:20px;flex-wrap:wrap">
+        <button class="btn-sm btn-accent" onclick="openModal('modal-quiz');popularSelectsCursos()" style="margin-left:auto">+ Criar Quiz</button>
+      </div>
+      <div class="grid-2">
+        <div class="card">
+          <div class="card-header"><span class="card-title">Quizzes Ativos</span></div>
+          <div id="quizzes-list"></div>
+        </div>
+        <div class="card">
+          <div class="card-header"><span class="card-title">Atividades para Corrigir</span><span class="nav-badge" style="background:var(--yellow)">7</span></div>
+          <div id="corrections-list"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ALUNOS -->
+    <div class="page" id="page-alunos">
+      <div style="display:flex;gap:10px;margin-bottom:20px;flex-wrap:wrap">
+        <input class="input-field" style="max-width:280px" placeholder="🔍 Buscar aluno...">
+        <select class="input-field" style="max-width:160px">
+          <option>Todos</option>
+          <option>Ativos</option>
+          <option>Bloqueados</option>
+          <option>Inadimplentes</option>
+        </select>
+        <button class="btn-sm btn-accent" onclick="openModal('modal-aluno')" style="margin-left:auto">+ Cadastrar Aluno</button>
+      </div>
+      <div class="card">
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Nome</th><th>E-mail</th><th>Cursos</th><th>Vencimento</th><th>Status</th><th>Ações</th></tr></thead>
+            <tbody id="alunos-table"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- GAMIFICAÇÃO -->
+    <div class="page" id="page-gamificacao">
+      <div class="grid-2" style="margin-bottom:0">
+        <div class="card">
+          <div class="card-header"><span class="card-title">🏆 Ranking de Alunos</span></div>
+          <div id="ranking-list"></div>
+        </div>
+        <div class="card">
+          <div class="card-header"><span class="card-title">⚙️ Regras de Pontuação</span></div>
+          <div id="gamif-rules"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- PAGAMENTOS -->
+    <div class="page" id="page-pagamentos">
+      <div class="stats-grid" style="margin-bottom:20px">
+        <div class="stat-card green">
+          <div class="stat-label">Receita do Mês</div>
+          <div class="stat-value">R$47.320</div>
+          <div class="stat-change up">▲ 8,4%</div>
+        </div>
+        <div class="stat-card yellow">
+          <div class="stat-label">Inadimplentes</div>
+          <div class="stat-value">34</div>
+          <div class="stat-change down">▲ 5 novos</div>
+        </div>
+        <div class="stat-card blue">
+          <div class="stat-label">PIX</div>
+          <div class="stat-value">68%</div>
+          <div class="stat-change up">Método preferido</div>
+        </div>
+        <div class="stat-card purple">
+          <div class="stat-label">Receita Anual</div>
+          <div class="stat-value">R$412k</div>
+          <div class="stat-change up">▲ 23% vs 2024</div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-header"><span class="card-title">Transações Recentes</span></div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Aluno</th><th>Valor</th><th>Método</th><th>Data</th><th>Status</th></tr></thead>
+            <tbody id="payments-table"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- CUPONS -->
+    <div class="page" id="page-cupons">
+      <div style="display:flex;gap:10px;margin-bottom:20px;flex-wrap:wrap">
+        <button class="btn-sm btn-accent" onclick="openModal('modal-cupom')" style="margin-left:auto">+ Criar Cupom</button>
+      </div>
+      <div class="card">
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Código</th><th>Desconto</th><th>Usos</th><th>Vencimento</th><th>Status</th><th>Ações</th></tr></thead>
+            <tbody id="cupons-table"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- RELATÓRIOS -->
+    <div class="page" id="page-relatorios">
+      <div class="grid-2">
+        <div class="card">
+          <div class="card-header"><span class="card-title">📊 Gerar Relatórios</span></div>
+          <div id="reports-list"></div>
+        </div>
+        <div class="card">
+          <div class="card-header"><span class="card-title">📈 Evolução de Matrículas</span></div>
+          <div class="chart-canvas" style="margin-top:0">
+            <div class="chart-bars" id="chart-matriculas"></div>
+            <div class="chart-labels" id="chart-mat-labels"></div>
+          </div>
+          <div style="margin-top:16px">
+            <div class="stat-label" style="margin-bottom:4px">Receita Anual 2025</div>
+            <div style="font-family:var(--font-display);font-size:22px;font-weight:700;color:var(--green)">R$ 412.840</div>
+          </div>
+        </div>
+      </div>
+      <div class="card" style="margin-top:16px">
+        <div class="card-header"><span class="card-title">🎓 Ranking de Desempenho</span></div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>#</th><th>Aluno</th><th>Pontos</th><th>Conclusão</th><th>Frequência</th></tr></thead>
+            <tbody id="ranking-table"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- IA -->
+    <div class="page" id="page-ia">
+      <div class="grid-2" style="margin-bottom:0">
+        <div class="ai-chat">
+          <div class="ai-header">
+            <div class="ai-dot"></div>
+            <span style="font-weight:600;font-size:14px">EduAI — Assistente Inteligente</span>
+            <span style="margin-left:auto;font-size:12px;color:var(--text3)">GPT-4 Turbo</span>
+          </div>
+          <div class="ai-messages" id="ai-messages">
+            <div class="msg ai">👋 Olá! Sou o <strong>EduAI</strong>, seu assistente integrado. Posso responder dúvidas dos alunos, recomendar aulas, criar planos de estudo, gerar resumos, analisar desempenho e muito mais. Como posso ajudar?</div>
+          </div>
+          <div class="ai-input-row">
+            <input class="ai-input" id="ai-input" placeholder="Digite uma pergunta ou comando para a IA..." onkeydown="if(event.key==='Enter')sendAI()">
+            <button class="ai-send" onclick="sendAI()">Enviar</button>
+          </div>
+        </div>
+        <div>
+          <div class="card" style="margin-bottom:16px">
+            <div class="card-header"><span class="card-title">🤖 Recursos de IA</span></div>
+            <div id="ia-features"></div>
+          </div>
+          <div class="card">
+            <div class="card-header"><span class="card-title">📋 Insights Recentes</span></div>
+            <div id="ia-insights"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ADMINS -->
+    <div class="page" id="page-admins">
+      <div style="display:flex;gap:10px;margin-bottom:20px">
+        <button class="btn-sm btn-accent" onclick="openModal('modal-admin')" style="margin-left:auto">+ Novo Administrador</button>
+      </div>
+      <div class="card">
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Nome</th><th>E-mail</th><th>Nível</th><th>Permissões</th><th>Status</th><th>Ações</th></tr></thead>
+            <tbody id="admins-table"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <!-- LOGS -->
+    <div class="page" id="page-logs">
+      <div class="card">
+        <div class="card-header">
+          <span class="card-title">📋 Registro de Atividades</span>
+          <div style="display:flex;gap:8px">
+            <select class="input-field" style="max-width:150px;padding:7px 12px;font-size:13px">
+              <option>Todos os eventos</option>
+              <option>Login</option>
+              <option>Edição</option>
+              <option>Exclusão</option>
+            </select>
+            <button class="btn-sm btn-ghost">Exportar</button>
+          </div>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Horário</th><th>Usuário</th><th>Ação</th><th>Recurso</th><th>IP</th><th>Status</th></tr></thead>
+            <tbody id="logs-table"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<!-- MODALS -->
+<div class="modal-overlay" id="modal-curso">
+  <div class="modal" style="max-width:560px">
+    <div class="modal-title">📚 Novo Curso</div>
+    <div style="display:flex;flex-direction:column;gap:12px">
+      <div><label style="font-size:12px;color:var(--text2);display:block;margin-bottom:4px">Título do Curso</label>
+        <input id="curso-titulo" class="input-field" placeholder="Ex: JavaScript do Zero ao Avançado"></div>
+      <div class="form-row">
+        <div><label style="font-size:12px;color:var(--text2);display:block;margin-bottom:4px">Categoria</label>
+          <input id="curso-categoria" class="input-field" placeholder="Ex: Kung Fu, Artes Marciais..."></div>
+        <div><label style="font-size:12px;color:var(--text2);display:block;margin-bottom:4px">Preço (R$)</label>
+          <input id="curso-preco" class="input-field" type="number" placeholder="197,00"></div>
+      </div>
+      <div><label style="font-size:12px;color:var(--text2);display:block;margin-bottom:4px">Descrição</label>
+        <textarea id="curso-descricao" class="input-field" rows="2" placeholder="Descrição do curso..."></textarea></div>
+      <div class="form-row">
+        <div><label style="font-size:12px;color:var(--text2);display:block;margin-bottom:4px">Nível</label>
+          <input id="curso-nivel" class="input-field" placeholder="Ex: Iniciante, Avançado..."></div>
+        <div><label style="font-size:12px;color:var(--text2);display:block;margin-bottom:4px">Status</label>
+          <select id="curso-status" class="input-field"><option>Rascunho</option><option>Publicado</option></select></div>
+      </div>
+
+      <!-- VÍDEO DE APRESENTAÇÃO -->
+      <div>
+        <label style="font-size:12px;color:var(--text2);display:block;margin-bottom:8px">🎬 Vídeo de Apresentação do Curso</label>
+        <!-- Abas de origem -->
+        <div style="display:flex;gap:0;margin-bottom:10px;border:1px solid var(--border);border-radius:var(--radius-sm);overflow:hidden">
+          <button id="tab-upload" onclick="switchVideoTab('upload')"
+            style="flex:1;padding:9px;font-size:12px;font-weight:600;border:none;cursor:pointer;transition:.2s;
+                   background:var(--accent);color:#fff;font-family:var(--font-body)">
+            📁 Arquivo / Celular
+          </button>
+          <button id="tab-url" onclick="switchVideoTab('url')"
+            style="flex:1;padding:9px;font-size:12px;font-weight:600;border:none;cursor:pointer;transition:.2s;
+                   background:var(--surface2);color:var(--text2);font-family:var(--font-body)">
+            🔗 Link (YouTube / Vimeo)
+          </button>
+        </div>
+
+        <!-- Painel: Upload do celular/armazenamento -->
+        <div id="panel-upload">
+          <div id="drop-zone"
+            onclick="document.getElementById('video-file-input').click()"
+            style="border:2px dashed var(--border);border-radius:var(--radius-sm);padding:24px 16px;
+                   text-align:center;cursor:pointer;transition:.2s;background:var(--surface2);"
+            ondragover="event.preventDefault();this.style.borderColor='var(--accent)'"
+            ondragleave="this.style.borderColor='var(--border)'"
+            ondrop="handleVideoDrop(event)">
+            <div style="font-size:32px;margin-bottom:8px">📲</div>
+            <div style="font-size:13px;font-weight:600;color:var(--text);margin-bottom:4px">
+              Toque para selecionar o vídeo
+            </div>
+            <div style="font-size:11px;color:var(--text3)">
+              Galeria, câmera ou armazenamento interno · MP4, MOV, AVI · até 2 GB
+            </div>
+          </div>
+          <!-- Input oculto — aceita vídeo da galeria/câmera no celular -->
+          <input id="video-file-input" type="file"
+            accept="video/mp4,video/quicktime,video/x-msvideo,video/*"
+            style="display:none"
+            onchange="handleVideoSelect(this)">
+          <!-- Preview após seleção -->
+          <div id="video-preview" style="display:none;margin-top:10px">
+            <div style="display:flex;align-items:center;gap:10px;padding:10px 14px;
+                        background:rgba(16,185,129,.1);border:1px solid rgba(16,185,129,.3);
+                        border-radius:var(--radius-sm)">
+              <span style="font-size:20px">🎬</span>
+              <div style="flex:1;overflow:hidden">
+                <div id="video-name" style="font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis"></div>
+                <div id="video-size" style="font-size:11px;color:var(--text2)"></div>
+              </div>
+              <button onclick="clearVideo()"
+                style="background:none;border:none;color:var(--red);cursor:pointer;font-size:18px;padding:2px">✕</button>
+            </div>
+            <!-- Barra de progresso simulada -->
+            <div style="margin-top:8px">
+              <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--text2);margin-bottom:4px">
+                <span>Preparando upload…</span>
+                <span id="upload-pct">0%</span>
+              </div>
+              <div class="progress-bar"><div id="upload-bar" class="progress-fill blue" style="width:0%"></div></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Painel: URL externa -->
+        <div id="panel-url" style="display:none">
+          <input class="input-field" id="video-url-input"
+            placeholder="https://youtube.com/watch?v=... ou https://vimeo.com/...">
+          <div style="display:flex;gap:8px;margin-top:8px">
+            <div style="flex:1;padding:10px;background:var(--surface2);border-radius:var(--radius-sm);
+                        text-align:center;cursor:pointer;border:1px solid var(--border);transition:.2s"
+              onclick="document.getElementById('video-url-input').value='https://youtube.com/'">
+              <div style="font-size:18px">▶️</div>
+              <div style="font-size:11px;color:var(--text2);margin-top:4px">YouTube</div>
+            </div>
+            <div style="flex:1;padding:10px;background:var(--surface2);border-radius:var(--radius-sm);
+                        text-align:center;cursor:pointer;border:1px solid var(--border);transition:.2s"
+              onclick="document.getElementById('video-url-input').value='https://vimeo.com/'">
+              <div style="font-size:18px">🎥</div>
+              <div style="font-size:11px;color:var(--text2);margin-top:4px">Vimeo</div>
+            </div>
+            <div style="flex:1;padding:10px;background:var(--surface2);border-radius:var(--radius-sm);
+                        text-align:center;cursor:pointer;border:1px solid var(--border);transition:.2s"
+              onclick="document.getElementById('video-url-input').value='https://drive.google.com/'">
+              <div style="font-size:18px">☁️</div>
+              <div style="font-size:11px;color:var(--text2);margin-top:4px">Google Drive</div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <!-- FIM VÍDEO -->
+
+    </div>
+    <div class="modal-actions">
+      <button class="btn-sm btn-ghost" onclick="closeModal('modal-curso')">Cancelar</button>
+      <button class="btn-sm btn-accent" onclick="salvarCursoFirebase()">Criar Curso</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="modal-aluno">
+  <div class="modal">
+    <div class="modal-title">👤 Cadastrar Aluno</div>
+    <div style="display:flex;flex-direction:column;gap:12px">
+      <div class="form-row">
+        <div><label style="font-size:12px;color:var(--text2);display:block;margin-bottom:4px">Nome Completo</label>
+          <input id="aluno-nome" class="input-field" placeholder="Nome do aluno"></div>
+        <div><label style="font-size:12px;color:var(--text2);display:block;margin-bottom:4px">E-mail</label>
+          <input id="aluno-email" class="input-field" type="email" placeholder="email@exemplo.com"></div>
+      </div>
+      <div class="form-row">
+        <div><label style="font-size:12px;color:var(--text2);display:block;margin-bottom:4px">Telefone</label>
+          <input id="aluno-tel" class="input-field" placeholder="(11) 99999-9999"></div>
+        <div><label style="font-size:12px;color:var(--text2);display:block;margin-bottom:4px">Curso</label>
+          <select id="aluno-curso" class="input-field"><option>Selecionar curso</option></select></div>
+      </div>
+      <div class="form-row">
+        <div><label style="font-size:12px;color:var(--text2);display:block;margin-bottom:4px">Vencimento</label>
+          <input id="aluno-venc" class="input-field" type="date"></div>
+        <div><label style="font-size:12px;color:var(--text2);display:block;margin-bottom:4px">Desconto</label>
+          <input id="aluno-desc" class="input-field" placeholder="0%"></div>
+      </div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn-sm btn-ghost" onclick="closeModal('modal-aluno')">Cancelar</button>
+      <button class="btn-sm btn-accent" onclick="salvarAlunoFirebase()">Cadastrar</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="modal-cupom">
+  <div class="modal">
+    <div class="modal-title">🏷️ Criar Cupom de Desconto</div>
+    <div style="display:flex;flex-direction:column;gap:12px">
+      <div><label style="font-size:12px;color:var(--text2);display:block;margin-bottom:4px">Código do Cupom</label>
+        <input id="cupom-code" class="input-field" placeholder="PROMO2025" style="text-transform:uppercase"></div>
+      <div class="form-row">
+        <div><label style="font-size:12px;color:var(--text2);display:block;margin-bottom:4px">Tipo de Desconto</label>
+          <select id="cupom-tipo" class="input-field"><option>Porcentagem (%)</option><option>Valor fixo (R$)</option></select></div>
+        <div><label style="font-size:12px;color:var(--text2);display:block;margin-bottom:4px">Valor</label>
+          <input id="cupom-valor" class="input-field" type="number" placeholder="20"></div>
+      </div>
+      <div class="form-row">
+        <div><label style="font-size:12px;color:var(--text2);display:block;margin-bottom:4px">Limite de Usos</label>
+          <input id="cupom-limite" class="input-field" type="number" placeholder="100"></div>
+        <div><label style="font-size:12px;color:var(--text2);display:block;margin-bottom:4px">Validade</label>
+          <input id="cupom-validade" class="input-field" type="date"></div>
+      </div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn-sm btn-ghost" onclick="closeModal('modal-cupom')">Cancelar</button>
+      <button class="btn-sm btn-accent" onclick="salvarCupomFirebase()">Criar Cupom</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="modal-notif">
+  <div class="modal">
+    <div class="modal-title">📣 Enviar Notificação</div>
+    <div style="display:flex;flex-direction:column;gap:12px">
+      <div><label style="font-size:12px;color:var(--text2);display:block;margin-bottom:4px">Destinatários</label>
+        <select class="input-field"><option>Todos os alunos</option><option>Alunos de um curso</option><option>Alunos inadimplentes</option><option>Alunos inativos</option></select></div>
+      <div><label style="font-size:12px;color:var(--text2);display:block;margin-bottom:4px">Título</label>
+        <input class="input-field" placeholder="Título da notificação"></div>
+      <div><label style="font-size:12px;color:var(--text2);display:block;margin-bottom:4px">Mensagem</label>
+        <textarea class="input-field" rows="4" placeholder="Digite a mensagem..."></textarea></div>
+      <div><label style="font-size:12px;color:var(--text2);display:block;margin-bottom:4px">Canal</label>
+        <select class="input-field"><option>Push + E-mail</option><option>Apenas Push</option><option>Apenas E-mail</option><option>WhatsApp</option></select></div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn-sm btn-ghost" onclick="closeModal('modal-notif')">Cancelar</button>
+      <button class="btn-sm btn-accent" onclick="saveAndClose('modal-notif','📣','Notificação enviada com sucesso!')">Enviar Agora</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="modal-admin">
+  <div class="modal">
+    <div class="modal-title">🛡️ Novo Administrador</div>
+    <div style="display:flex;flex-direction:column;gap:12px">
+      <div class="form-row">
+        <div><label style="font-size:12px;color:var(--text2);display:block;margin-bottom:4px">Nome</label>
+          <input class="input-field" placeholder="Nome"></div>
+        <div><label style="font-size:12px;color:var(--text2);display:block;margin-bottom:4px">E-mail</label>
+          <input class="input-field" placeholder="email@admin.com"></div>
+      </div>
+      <div><label style="font-size:12px;color:var(--text2);display:block;margin-bottom:4px">Nível de Acesso</label>
+        <select class="input-field"><option>Admin Completo</option><option>Admin de Conteúdo</option><option>Admin Financeiro</option><option>Admin de Suporte</option></select></div>
+      <div><label style="font-size:12px;color:var(--text2);display:block;margin-bottom:4px">Permissões Específicas</label>
+        <div class="perm-grid" id="perm-grid"></div>
+      </div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn-sm btn-ghost" onclick="closeModal('modal-admin')">Cancelar</button>
+      <button class="btn-sm btn-accent" onclick="saveAndClose('modal-admin','🛡️','Administrador criado com sucesso!')">Criar Admin</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="modal-aula">
+  <div class="modal">
+    <div class="modal-title">🎬 Nova Aula</div>
+    <div style="display:flex;flex-direction:column;gap:12px">
+      <div><label style="font-size:12px;color:var(--text2);display:block;margin-bottom:4px">Título da Aula</label>
+        <input id="aula-titulo" class="input-field" placeholder="Ex: Introdução ao Kung Fu"></div>
+      <div class="form-row">
+        <div><label style="font-size:12px;color:var(--text2);display:block;margin-bottom:4px">Curso</label>
+          <select id="aula-curso" class="input-field"><option value="">Selecionar curso</option></select></div>
+        <div><label style="font-size:12px;color:var(--text2);display:block;margin-bottom:4px">Módulo</label>
+          <input id="aula-modulo" class="input-field" placeholder="Ex: Módulo 1"></div>
+      </div>
+      <div><label style="font-size:12px;color:var(--text2);display:block;margin-bottom:4px">URL do Vídeo (YouTube/Vimeo)</label>
+        <input id="aula-video" class="input-field" placeholder="https://youtube.com/watch?v=..."></div>
+      <div><label style="font-size:12px;color:var(--text2);display:block;margin-bottom:4px">Link do Material de Apoio (PDF/Drive)</label>
+        <input id="aula-material" class="input-field" placeholder="https://drive.google.com/..."></div>
+      <div><label style="font-size:12px;color:var(--text2);display:block;margin-bottom:4px">Duração</label>
+        <input id="aula-duracao" class="input-field" placeholder="Ex: 20:00"></div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn-sm btn-ghost" onclick="closeModal('modal-aula')">Cancelar</button>
+      <button class="btn-sm btn-accent" onclick="salvarAulaFirebase()">Salvar Aula</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal-overlay" id="modal-quiz">
+  <div class="modal">
+    <div class="modal-title">❓ Criar Quiz</div>
+    <div style="display:flex;flex-direction:column;gap:12px">
+      <div><label style="font-size:12px;color:var(--text2);display:block;margin-bottom:4px">Título do Quiz</label>
+        <input id="quiz-titulo" class="input-field" placeholder="Ex: Prova Final - Módulo 1"></div>
+      <div class="form-row">
+        <div><label style="font-size:12px;color:var(--text2);display:block;margin-bottom:4px">Curso</label>
+          <select id="quiz-curso" class="input-field"><option value="">Selecionar curso</option></select></div>
+        <div><label style="font-size:12px;color:var(--text2);display:block;margin-bottom:4px">Tempo Limite</label>
+          <input id="quiz-tempo" class="input-field" placeholder="Ex: 60 minutos"></div>
+      </div>
+      <div><label style="font-size:12px;color:var(--text2);display:block;margin-bottom:4px">Nota Mínima para Aprovação</label>
+        <input id="quiz-nota" class="input-field" placeholder="Ex: 70"></div>
+      <div style="display:flex;align-items:center;gap:10px;padding:12px;background:var(--surface2);border-radius:var(--radius-sm)">
+        <span style="font-size:13px;color:var(--text2)">🤖 Usar IA para corrigir respostas discursivas</span>
+        <label class="toggle" style="margin-left:auto"><input type="checkbox" id="quiz-ia" checked><span class="slider"></span></label>
+      </div>
+    </div>
+    <div class="modal-actions">
+      <button class="btn-sm btn-ghost" onclick="closeModal('modal-quiz')">Cancelar</button>
+      <button class="btn-sm btn-accent" onclick="salvarQuizFirebase()">Criar Quiz</button>
+    </div>
+  </div>
+</div>
+
+<!-- TOAST -->
+<div class="toast" id="toast">
+  <span class="toast-icon" id="toast-icon">✅</span>
+  <span class="toast-text" id="toast-text">Operação realizada com sucesso!</span>
+</div>
+
+<script>
+// ── DATA ──
+const DATA = {
+  months: ['Jan','Fev','Mar','Abr','Mai','Jun','Jul','Ago','Set','Out','Nov','Dez'],
+  revenue: [28000,31000,35000,29000,42000,47000,38000,51000,44000,49000,53000,58000],
+  matriculas: [45,62,58,71,89,94,78,102,88,97,115,128],
+  cursos:[
+    {nome:'JavaScript do Zero ao Avançado',modulos:8,alunos:423,receita:'R$82.347',status:'active'},
+    {nome:'React Native — Apps Mobile',modulos:6,alunos:287,receita:'R$55.993',status:'active'},
+    {nome:'Python para Iniciantes',modulos:5,alunos:198,receita:'R$38.610',status:'active'},
+    {nome:'SQL & Banco de Dados',modulos:4,alunos:134,receita:'R$26.132',status:'active'},
+    {nome:'UX/UI Design Completo',modulos:7,alunos:89,receita:'R$17.355',status:'pending'},
+    {nome:'Firebase & Cloud',modulos:3,alunos:42,receita:'R$8.190',status:'inactive'},
+  ],
+  aulas:[
+    {titulo:'Variáveis e Tipos de Dados',curso:'JavaScript',duracao:'18:24',views:1203,material:'PDF'},
+    {titulo:'Funções e Escopo',curso:'JavaScript',duracao:'24:10',views:987,material:'ZIP'},
+    {titulo:'Componentes React',curso:'React Native',duracao:'31:05',views:743,material:'Código'},
+    {titulo:'AsyncStorage',curso:'React Native',duracao:'19:48',views:521,material:'PDF'},
+    {titulo:'Consultas SELECT',curso:'SQL',duracao:'22:15',views:412,material:'—'},
+  ],
+  alunos:[
+    {nome:'Ana Carolina Silva',email:'ana@email.com',cursos:3,venc:'15/08/2025',status:'active'},
+    {nome:'Bruno Ferreira',email:'bruno@email.com',cursos:1,venc:'02/07/2025',status:'pending'},
+    {nome:'Carlos Eduardo',email:'carlos@email.com',cursos:2,venc:'30/09/2025',status:'active'},
+    {nome:'Diana Souza',email:'diana@email.com',cursos:1,venc:'10/06/2025',status:'inactive'},
+    {nome:'Eduardo Lima',email:'edu@email.com',cursos:4,venc:'20/10/2025',status:'active'},
+    {nome:'Fernanda Costa',email:'fer@email.com',cursos:2,venc:'05/08/2025',status:'active'},
+  ],
+  pagamentos:[
+    {aluno:'Ana Carolina',valor:'R$197,00',metodo:'PIX',data:'27/06/2025',status:'active'},
+    {aluno:'Bruno Ferreira',valor:'R$97,00',metodo:'Cartão',data:'26/06/2025',status:'active'},
+    {aluno:'Carlos Eduardo',valor:'R$297,00',metodo:'PIX',data:'25/06/2025',status:'active'},
+    {aluno:'Diana Souza',valor:'R$147,00',metodo:'Boleto',data:'20/06/2025',status:'inactive'},
+    {aluno:'Eduardo Lima',valor:'R$497,00',metodo:'Cartão',data:'18/06/2025',status:'active'},
+  ],
+  cupons:[
+    {code:'PROMO30',desc:'30%',usos:'45/100',venc:'31/07/2025',status:'active'},
+    {code:'VERÃO50',desc:'50%',usos:'23/50',venc:'15/07/2025',status:'active'},
+    {code:'FIDELIDADE',desc:'R$50',usos:'100/100',venc:'01/06/2025',status:'inactive'},
+    {code:'NEWUSER',desc:'15%',usos:'210/500',venc:'31/12/2025',status:'active'},
+  ],
+  admins:[
+    {nome:'Administrador Master',email:'admin@kungfucursos.com.br',nivel:'Super Admin',perms:'Acesso Total',status:'active'},
+    {nome:'Maria Gestora',email:'maria@kungfucursos.com.br',nivel:'Admin Conteúdo',perms:'Cursos, Aulas',status:'active'},
+    {nome:'João Financeiro',email:'joao@kungfucursos.com.br',nivel:'Admin Financeiro',perms:'Pagamentos, Relatórios',status:'active'},
+  ],
+  logs:[
+    {hora:'14:32:05','user':'Admin Master',acao:'LOGIN',recurso:'Sistema',ip:'187.45.xx.xx',status:'active'},
+    {hora:'14:28:41','user':'Admin Master',acao:'EDIÇÃO',recurso:'Curso: JavaScript',ip:'187.45.xx.xx',status:'active'},
+    {hora:'14:15:22','user':'Maria Gestora',acao:'CRIAÇÃO',recurso:'Aula: Módulo 3',ip:'201.32.xx.xx',status:'active'},
+    {hora:'13:55:10','user':'João Financeiro',acao:'EXPORTAÇÃO',recurso:'Relatório Financeiro',ip:'189.20.xx.xx',status:'active'},
+    {hora:'13:41:33','user':'Admin Master',acao:'EXCLUSÃO',recurso:'Cupom: EXPIRADO',ip:'187.45.xx.xx',status:'inactive'},
+    {hora:'13:02:17','user':'Admin Master',acao:'BLOQUEIO',recurso:'Aluno: Diana Souza',ip:'187.45.xx.xx',status:'pending'},
+  ],
+  reports:[
+    {icon:'💰',label:'Relatório Financeiro',bg:'rgba(16,185,129,.1)'},
+    {icon:'⚠️',label:'Relatório de Inadimplência',bg:'rgba(245,158,11,.1)'},
+    {icon:'📊',label:'Relatório de Desempenho',bg:'rgba(99,102,241,.1)'},
+    {icon:'📅',label:'Relatório de Frequência',bg:'rgba(59,130,246,.1)'},
+    {icon:'🎓',label:'Relatório de Conclusão',bg:'rgba(16,185,129,.1)'},
+    {icon:'📈',label:'Evolução de Matrículas',bg:'rgba(59,130,246,.1)'},
+    {icon:'💳',label:'Receita Mensal',bg:'rgba(99,102,241,.1)'},
+    {icon:'📆',label:'Receita Anual',bg:'rgba(16,185,129,.1)'},
+  ],
+  iaFeatures:[
+    {icon:'💬',label:'Responder dúvidas frequentes'},
+    {icon:'🎯',label:'Recomendar aulas personalizadas'},
+    {icon:'📋',label:'Criar plano de estudos'},
+    {icon:'🔄',label:'Sugerir revisões inteligentes'},
+    {icon:'✍️',label:'Corrigir respostas discursivas'},
+    {icon:'📝',label:'Gerar resumos automáticos'},
+    {icon:'📊',label:'Analisar desempenho do aluno'},
+    {icon:'⏰',label:'Enviar lembretes inteligentes'},
+  ],
+  ranking:[
+    {pos:1,nome:'Ana Carolina Silva',pontos:9840,conclusao:'94%',freq:'98%'},
+    {pos:2,nome:'Eduardo Lima',pontos:8720,conclusao:'88%',freq:'95%'},
+    {pos:3,nome:'Carlos Eduardo',pontos:7650,conclusao:'82%',freq:'91%'},
+    {pos:4,nome:'Fernanda Costa',pontos:6430,conclusao:'76%',freq:'88%'},
+    {pos:5,nome:'Bruno Ferreira',pontos:5280,conclusao:'68%',freq:'79%'},
+  ],
+  topCourses:[
+    {nome:'JavaScript do Zero',perc:89},
+    {nome:'React Native',perc:74},
+    {nome:'Python Iniciantes',perc:61},
+    {nome:'SQL & Banco de Dados',perc:48},
+  ],
+  alerts:[
+    {icon:'⚠️',msg:'34 alunos com pagamento em atraso',color:'var(--yellow)'},
+    {icon:'🔴',msg:'3 alunos bloqueados aguardam revisão',color:'var(--red)'},
+    {icon:'💡',msg:'IA identificou 12 alunos em risco de evasão',color:'var(--purple)'},
+    {icon:'✅',msg:'Backup automático realizado às 03:00',color:'var(--green)'},
+  ],
+  quizzes:[
+    {titulo:'Prova Final — JS Módulo 1',curso:'JavaScript',questoes:20,entregas:45,media:'7.8'},
+    {titulo:'Quiz Rápido — React Hooks',curso:'React Native',questoes:10,entregas:28,media:'8.2'},
+    {titulo:'Avaliação SQL',curso:'SQL',questoes:15,entregas:19,media:'6.9'},
+  ],
+  corrections:[
+    {aluno:'Bruno Ferreira',quiz:'Prova Final JS',tipo:'Discursiva'},
+    {aluno:'Diana Souza',quiz:'Avaliação SQL',tipo:'Discursiva'},
+    {aluno:'Carlos Eduardo',quiz:'Prova Final JS',tipo:'Discursiva'},
+  ],
+  gamifRules:[
+    {acao:'Concluir uma aula',pontos:'+10 pts'},
+    {acao:'Tirar 10 em quiz',pontos:'+50 pts'},
+    {acao:'Streak de 7 dias',pontos:'+100 pts'},
+    {acao:'Completar módulo',pontos:'+200 pts'},
+    {acao:'Completar curso',pontos:'+500 pts'},
+  ],
+  perms:['Criar Cursos','Editar Cursos','Excluir Cursos','Gerenciar Alunos','Bloquear Alunos','Ver Financeiro','Criar Cupons','Enviar Notif','Ver Relatórios','Exportar PDFs','Gerenciar Certs','Ver Logs'],
+  iaInsights:[
+    {icon:'📉',msg:'Ana Silva não acessa há 5 dias — risco de evasão'},
+    {icon:'⭐',msg:'Eduardo Lima concluiu 3 cursos este mês'},
+    {icon:'💡',msg:'Módulo 4 de JS tem taxa de abandono de 32%'},
+  ],
+  enrollments:[
+    {nome:'Lucas Martins',curso:'JavaScript',data:'27/06',status:'active'},
+    {nome:'Julia Ramos',curso:'React Native',data:'27/06',status:'active'},
+    {nome:'Pedro Oliveira',curso:'Python',data:'26/06',status:'pending'},
+    {nome:'Sofia Melo',curso:'SQL',data:'25/06',status:'active'},
+  ]
+};
+
+// ── PAGES ──
+const pageInfo = {
+  dashboard:{title:'Dashboard',sub:'Visão geral do sistema'},
+  cursos:{title:'Gerenciar Cursos',sub:'Crie, edite e organize seus cursos'},
+  aulas:{title:'Aulas & Vídeos',sub:'Gerencie o conteúdo das aulas'},
+  quizzes:{title:'Quizzes & Avaliações',sub:'Crie provas e corrija atividades'},
+  alunos:{title:'Gerenciar Alunos',sub:'Controle acesso, bloqueios e vencimentos'},
+  gamificacao:{title:'Gamificação',sub:'Rankings e regras de pontuação'},
+  pagamentos:{title:'Pagamentos & Financeiro',sub:'PIX, cartão, boleto e inadimplência'},
+  cupons:{title:'Cupons & Promoções',sub:'Crie descontos e campanhas promocionais'},
+  relatorios:{title:'Relatórios',sub:'Análises completas em PDF e Excel'},
+  ia:{title:'IA Integrada',sub:'Assistente inteligente para alunos e gestão'},
+  admins:{title:'Administradores',sub:'Gerencie acessos e permissões da equipe'},
+  logs:{title:'Logs do Sistema',sub:'Registro completo de todas as atividades'},
+};
+
+function showPage(name, el){
+  document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
+  document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));
+  document.getElementById('page-'+name).classList.add('active');
+  if(el) el.classList.add('active');
+  else{
+    document.querySelectorAll('.nav-item').forEach(n=>{
+      if(n.getAttribute('onclick')&&n.getAttribute('onclick').includes("'"+name+"'"))n.classList.add('active');
+    });
+  }
+  const info=pageInfo[name]||{title:name,sub:''};
+  document.getElementById('page-title').textContent=info.title;
+  document.getElementById('page-sub').textContent=info.sub;
+  if(window.innerWidth<900) document.getElementById('sidebar').classList.remove('open');
+}
+
+// ── CHART ──
+function buildChart(containerId, labelId, data, labels){
+  const c=document.getElementById(containerId);
+  const l=document.getElementById(labelId);
+  if(!c||!l) return;
+  const max=Math.max(...data);
+  c.innerHTML=data.map((v,i)=>{
+    const h=Math.round((v/max)*100);
+    return `<div class="bar" style="height:${h}%" title="${labels[i]}: ${v}"></div>`;
+  }).join('');
+  l.innerHTML=labels.map(m=>`<span>${m}</span>`).join('');
+}
+
+// ── RENDER FUNCTIONS ──
+function renderAll(){
+  buildChart('chart-bars','chart-labels',DATA.revenue,DATA.months);
+  buildChart('chart-matriculas','chart-mat-labels',DATA.matriculas,DATA.months);
+
+  // Top Courses
+  const tc=document.getElementById('top-courses');
+  if(tc) tc.innerHTML=DATA.topCourses.map(c=>`
+    <div style="margin-bottom:14px">
+      <div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:4px">
+        <span>${c.nome}</span><span style="color:var(--accent);font-weight:600">${c.perc}%</span>
+      </div>
+      <div class="progress-bar"><div class="progress-fill blue" style="width:${c.perc}%"></div></div>
+    </div>`).join('');
+
+  // Recent Enrollments
+  const re=document.getElementById('recent-enrollments');
+  if(re) re.innerHTML=DATA.enrollments.map(e=>`
+    <tr><td><strong>${e.nome}</strong></td><td>${e.curso}</td><td>${e.data}</td>
+    <td><span class="status-pill ${e.status}"><span class="dot"></span>${e.status==='active'?'Ativo':e.status==='pending'?'Pendente':'Inativo'}</span></td></tr>`).join('');
+
+  // Alerts
+  const al=document.getElementById('alerts-list');
+  if(al) al.innerHTML=DATA.alerts.map(a=>`
+    <div style="display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid rgba(30,45,69,.4)">
+      <span style="font-size:18px">${a.icon}</span>
+      <span style="font-size:13px;color:var(--text2)">${a.msg}</span>
+    </div>`).join('');
+
+  // Cursos table
+  const ct=document.getElementById('cursos-table');
+  if(ct) ct.innerHTML=DATA.cursos.map(c=>`
+    <tr><td><strong>${c.nome}</strong></td><td>${c.modulos}</td><td>${c.alunos}</td>
+    <td style="color:var(--green);font-weight:600">${c.receita}</td>
+    <td><span class="status-pill ${c.status}"><span class="dot"></span>${c.status==='active'?'Publicado':c.status==='pending'?'Rascunho':'Inativo'}</span></td>
+    <td><div style="display:flex;gap:6px">
+      <button class="btn-sm btn-ghost" style="padding:5px 10px;font-size:12px" onclick="showToast('✏️','Editando curso...')">Editar</button>
+      <button class="btn-sm" style="background:rgba(239,68,68,.15);color:var(--red);border:none;padding:5px 10px;font-size:12px;border-radius:6px;cursor:pointer" onclick="showToast('🗑️','Curso excluído')">Excluir</button>
+    </div></td></tr>`).join('');
+
+  // Aulas
+  const at=document.getElementById('aulas-table');
+  if(at) at.innerHTML=DATA.aulas.map(a=>`
+    <tr><td><strong>${a.titulo}</strong></td><td>${a.curso}</td><td>${a.duracao}</td>
+    <td>${a.views.toLocaleString()}</td>
+    <td><span class="tag student">${a.material}</span></td>
+    <td><button class="btn-sm btn-ghost" style="padding:5px 10px;font-size:12px" onclick="showToast('✏️','Editando aula...')">Editar</button></td></tr>`).join('');
+
+  // Alunos
+  const alt=document.getElementById('alunos-table');
+  if(alt) alt.innerHTML=DATA.alunos.map(a=>`
+    <tr><td><strong>${a.nome}</strong></td><td style="color:var(--text2)">${a.email}</td>
+    <td>${a.cursos}</td><td>${a.venc}</td>
+    <td><span class="status-pill ${a.status}"><span class="dot"></span>${a.status==='active'?'Ativo':a.status==='pending'?'Inadimplente':'Bloqueado'}</span></td>
+    <td><div style="display:flex;gap:4px">
+      <button class="btn-sm btn-ghost" style="padding:5px 9px;font-size:11px" onclick="showToast('✏️','Editando aluno...')">Editar</button>
+      <button class="btn-sm" style="background:rgba(245,158,11,.15);color:var(--yellow);border:none;padding:5px 9px;font-size:11px;border-radius:6px;cursor:pointer" onclick="showToast('🔒','Aluno bloqueado')">Bloquear</button>
+    </div></td></tr>`).join('');
+
+  // Payments
+  const pt=document.getElementById('payments-table');
+  if(pt) pt.innerHTML=DATA.pagamentos.map(p=>`
+    <tr><td><strong>${p.aluno}</strong></td><td style="color:var(--green);font-weight:600">${p.valor}</td>
+    <td><span class="tag student">${p.metodo}</span></td><td>${p.data}</td>
+    <td><span class="status-pill ${p.status}"><span class="dot"></span>${p.status==='active'?'Pago':'Pendente'}</span></td></tr>`).join('');
+
+  // Cupons
+  const kp=document.getElementById('cupons-table');
+  if(kp) kp.innerHTML=DATA.cupons.map(c=>`
+    <tr><td><strong style="font-family:monospace;color:var(--accent)">${c.code}</strong></td>
+    <td style="color:var(--green);font-weight:700">${c.desc}</td><td>${c.usos}</td><td>${c.venc}</td>
+    <td><span class="status-pill ${c.status}"><span class="dot"></span>${c.status==='active'?'Ativo':'Expirado'}</span></td>
+    <td><button class="btn-sm btn-ghost" style="padding:5px 10px;font-size:12px" onclick="showToast('🗑️','Cupom removido')">Remover</button></td></tr>`).join('');
+
+  // Reports
+  const rl=document.getElementById('reports-list');
+  if(rl) rl.innerHTML=DATA.reports.map(r=>`
+    <div class="report-item">
+      <div style="display:flex;align-items:center;gap:12px">
+        <div class="report-icon" style="background:${r.bg}">${r.icon}</div>
+        <span style="font-size:13.5px;font-weight:500">${r.label}</span>
+      </div>
+      <div style="display:flex;gap:6px">
+        <button class="report-btn pdf" onclick="showToast('📄','Gerando PDF...')">📄 PDF</button>
+        <button class="report-btn xls" onclick="showToast('📊','Exportando Excel...')">📊 XLS</button>
+      </div>
+    </div>`).join('');
+
+  // IA Features
+  const iaf=document.getElementById('ia-features');
+  if(iaf) iaf.innerHTML='<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">'+
+    DATA.iaFeatures.map(f=>`
+      <div style="display:flex;align-items:center;gap:8px;padding:10px;background:var(--surface2);border-radius:8px;cursor:pointer;transition:.2s" onclick="showToast('🤖','Recurso de IA ativado!')">
+        <span style="font-size:16px">${f.icon}</span>
+        <span style="font-size:12px;font-weight:500">${f.label}</span>
+      </div>`).join('')+'</div>';
+
+  // IA Insights
+  const iai=document.getElementById('ia-insights');
+  if(iai) iai.innerHTML=DATA.iaInsights.map(i=>`
+    <div style="display:flex;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid rgba(30,45,69,.4)">
+      <span style="font-size:18px">${i.icon}</span>
+      <span style="font-size:13px;color:var(--text2)">${i.msg}</span>
+    </div>`).join('');
+
+  // Admins
+  const admt=document.getElementById('admins-table');
+  if(admt) admt.innerHTML=DATA.admins.map(a=>`
+    <tr><td><strong>${a.nome}</strong></td><td style="color:var(--text2)">${a.email}</td>
+    <td><span class="tag admin">${a.nivel}</span></td><td style="font-size:12px;color:var(--text2)">${a.perms}</td>
+    <td><span class="status-pill active"><span class="dot"></span>Ativo</span></td>
+    <td><button class="btn-sm btn-ghost" style="padding:5px 10px;font-size:12px" onclick="showToast('✏️','Editando permissões...')">Editar</button></td></tr>`).join('');
+
+  // Logs
+  const lt=document.getElementById('logs-table');
+  if(lt) lt.innerHTML=DATA.logs.map(l=>`
+    <tr><td style="font-family:monospace;font-size:12px;color:var(--text3)">${l.hora}</td>
+    <td><strong>${l.user}</strong></td>
+    <td><span class="tag ${l.acao==='LOGIN'?'admin':l.acao==='EXCLUSÃO'||l.acao==='BLOQUEIO'?'blocked':'student'}">${l.acao}</span></td>
+    <td style="font-size:13px">${l.recurso}</td>
+    <td style="font-family:monospace;font-size:12px;color:var(--text3)">${l.ip}</td>
+    <td><span class="status-pill ${l.status}"><span class="dot"></span>${l.status==='active'?'OK':l.status==='inactive'?'Removido':'Aviso'}</span></td></tr>`).join('');
+
+  // Quizzes
+  const ql=document.getElementById('quizzes-list');
+  if(ql) ql.innerHTML=DATA.quizzes.map(q=>`
+    <div style="padding:14px 0;border-bottom:1px solid rgba(30,45,69,.4)">
+      <div style="font-weight:600;font-size:13.5px;margin-bottom:4px">${q.titulo}</div>
+      <div style="display:flex;gap:12px;font-size:12px;color:var(--text2)">
+        <span>📋 ${q.questoes} questões</span><span>📥 ${q.entregas} entregas</span><span>⭐ Média: ${q.media}</span>
+      </div>
+    </div>`).join('');
+
+  const cl=document.getElementById('corrections-list');
+  if(cl) cl.innerHTML=DATA.corrections.map(c=>`
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:12px 0;border-bottom:1px solid rgba(30,45,69,.4)">
+      <div>
+        <div style="font-size:13.5px;font-weight:500">${c.aluno}</div>
+        <div style="font-size:12px;color:var(--text2)">${c.quiz}</div>
+      </div>
+      <div style="display:flex;gap:6px">
+        <button class="btn-sm" style="background:rgba(99,102,241,.15);color:var(--purple);border:none;padding:5px 10px;font-size:11px;border-radius:6px;cursor:pointer" onclick="showToast('🤖','IA corrigindo automaticamente...')">🤖 IA</button>
+        <button class="btn-sm btn-ghost" style="padding:5px 10px;font-size:11px" onclick="showToast('✏️','Abrindo atividade...')">Corrigir</button>
+      </div>
+    </div>`).join('');
+
+  // Gamificação
+  const rl2=document.getElementById('ranking-list');
+  if(rl2) rl2.innerHTML=DATA.ranking.slice(0,3).map((r,i)=>{
+    const medals=['🥇','🥈','🥉'];
+    return `<div style="display:flex;align-items:center;gap:12px;padding:12px 0;border-bottom:1px solid rgba(30,45,69,.4)">
+      <span style="font-size:22px">${medals[i]}</span>
+      <div style="flex:1">
+        <div style="font-weight:600;font-size:13.5px">${r.nome}</div>
+        <div style="font-size:12px;color:var(--text2)">${r.pontos.toLocaleString()} pontos</div>
+      </div>
+    </div>`;}).join('');
+
+  const gr=document.getElementById('gamif-rules');
+  if(gr) gr.innerHTML=DATA.gamifRules.map(r=>`
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:10px 0;border-bottom:1px solid rgba(30,45,69,.4)">
+      <span style="font-size:13px">${r.acao}</span>
+      <div style="display:flex;align-items:center;gap:8px">
+        <span style="color:var(--yellow);font-weight:700;font-size:13px">${r.pontos}</span>
+        <button class="btn-sm btn-ghost" style="padding:4px 8px;font-size:11px" onclick="showToast('✏️','Regra atualizada!')">Editar</button>
+      </div>
+    </div>`).join('');
+
+  // Ranking table
+  const rkt=document.getElementById('ranking-table');
+  if(rkt) rkt.innerHTML=DATA.ranking.map(r=>`
+    <tr><td style="font-weight:700;font-size:16px">${['🥇','🥈','🥉','4°','5°'][r.pos-1]}</td>
+    <td><strong>${r.nome}</strong></td>
+    <td style="color:var(--yellow);font-weight:700">${r.pontos.toLocaleString()}</td>
+    <td>${r.conclusao}</td><td>${r.freq}</td></tr>`).join('');
+
+  // Perms grid
+  const pg=document.getElementById('perm-grid');
+  if(pg) pg.innerHTML=DATA.perms.map(p=>`
+    <div class="perm-item">
+      <label class="toggle"><input type="checkbox" checked><span class="slider"></span></label>
+      <span>${p}</span>
+    </div>`).join('');
+}
+
+// ── AUTH (substituída pelo Firebase no módulo ES acima) ──
+window.doLogin = window.doLogin || function(){};
+window.doLogout = window.doLogout || function(){};
+
+// ── MODALS ──
+function openModal(id){
+  document.getElementById(id).classList.add('open');
+}
+function closeModal(id){
+  document.getElementById(id).classList.remove('open');
+}
+function saveAndClose(id,icon,msg){
+  closeModal(id);
+  showToast(icon,msg);
+}
+document.querySelectorAll('.modal-overlay').forEach(m=>{
+  m.addEventListener('click',e=>{ if(e.target===m) m.classList.remove('open'); });
+});
+
+// ── TOAST ──
+let toastTimer;
+function showToast(icon,msg){
+  clearTimeout(toastTimer);
+  const t=document.getElementById('toast');
+  document.getElementById('toast-icon').textContent=icon;
+  document.getElementById('toast-text').textContent=msg;
+  t.classList.add('show');
+  toastTimer=setTimeout(()=>t.classList.remove('show'),3000);
+}
+
+// ── AI CHAT ──
+async function sendAI(){
+  const input=document.getElementById('ai-input');
+  const val=input.value.trim();
+  if(!val) return;
+  input.value='';
+  const msgs=document.getElementById('ai-messages');
+  msgs.innerHTML+=`<div class="msg user">${val}</div>`;
+  msgs.innerHTML+=`<div class="msg ai" id="ai-typing"><span style="color:var(--text3)">EduAI está pensando...</span></div>`;
+  msgs.scrollTop=msgs.scrollHeight;
+  try{
+    const res=await fetch('https://api.anthropic.com/v1/messages',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({
+        model:'claude-sonnet-4-6',max_tokens:1000,
+        system:'Você é o EduAI, assistente inteligente de uma plataforma de ensino online (LMS). Responda em português de forma clara, útil e objetiva. Você pode ajudar a: responder dúvidas de alunos, recomendar aulas, criar planos de estudo, analisar desempenho, corrigir exercícios e enviar lembretes. Seja prestativo e educacional.',
+        messages:[{role:'user',content:val}]
+      })
+    });
+    const data=await res.json();
+    const reply=data.content?.[0]?.text||'Desculpe, não consegui processar sua solicitação.';
+    document.getElementById('ai-typing').outerHTML=`<div class="msg ai">${reply}</div>`;
+  }catch(e){
+    document.getElementById('ai-typing').outerHTML=`<div class="msg ai">Erro de conexão. Por favor, tente novamente.</div>`;
+  }
+  msgs.scrollTop=msgs.scrollHeight;
+}
+
+// ── SIDEBAR TOGGLE ──
+function toggleSidebar(){
+  document.getElementById('sidebar').classList.toggle('open');
+}
+
+// ── POPULAR SELECTS DE CURSO DINAMICAMENTE ──
+window.popularSelectsCursos = async function(){
+  try {
+    const snap = await getDocs(collection(db,'cursos'));
+    const opts = ['<option value="">Selecionar curso</option>'];
+    snap.forEach(d => {
+      const c = d.data();
+      opts.push(`<option value="${d.id}">${c.titulo||'Sem título'}</option>`);
+    });
+    const html = opts.join('');
+    const selects = ['aula-curso','quiz-curso','aluno-curso'];
+    selects.forEach(id => {
+      const el = document.getElementById(id);
+      if(el) el.innerHTML = html;
+    });
+  } catch(e){ console.error('Erro ao popular selects:',e); }
+}
+
+// ── SALVAR AULA NO FIRESTORE ──
+window.salvarAulaFirebase = async function(){
+  const titulo = document.getElementById('aula-titulo').value.trim();
+  const cursoId = document.getElementById('aula-curso').value;
+  const modulo = document.getElementById('aula-modulo').value.trim();
+  const videoUrl = document.getElementById('aula-video').value.trim();
+  const material = document.getElementById('aula-material').value.trim();
+  const duracao = document.getElementById('aula-duracao').value.trim();
+  if(!titulo){ showToast('⚠️','Digite o título da aula'); return; }
+  if(!cursoId){ showToast('⚠️','Selecione um curso'); return; }
+  try {
+    await addDoc(collection(db,'aulas'),{
+      titulo, cursoId, modulo, videoUrl, material, duracao,
+      views: 0, criadoEm: serverTimestamp()
+    });
+    closeModal('modal-aula');
+    showToast('🎬','Aula criada com sucesso!');
+    addLog('CRIAÇÃO',`Aula: ${titulo}`, auth.currentUser?.email);
+    loadAulasFirebase();
+    // Limpar campos
+    ['aula-titulo','aula-modulo','aula-video','aula-material','aula-duracao'].forEach(id=>{
+      const el=document.getElementById(id); if(el) el.value='';
+    });
+  } catch(e){ showToast('❌','Erro ao salvar aula.'); console.error(e); }
+}
+
+// ── CARREGAR AULAS DO FIRESTORE ──
+window.loadAulasFirebase = async function(){
+  try {
+    const snap = await getDocs(collection(db,'aulas'));
+    const aulas = [];
+    snap.forEach(d => aulas.push({id:d.id,...d.data()}));
+    if(aulas.length === 0) return;
+    const at = document.getElementById('aulas-table');
+    if(at) at.innerHTML = aulas.map(a=>`
+      <tr>
+        <td><strong>${a.titulo||''}</strong></td>
+        <td>${a.modulo||'—'}</td>
+        <td>${a.duracao||'—'}</td>
+        <td>${(a.views||0).toLocaleString()}</td>
+        <td>${a.material ? `<a href="${a.material}" target="_blank" style="color:var(--accent);font-size:12px">📄 Ver</a>` : '—'}</td>
+        <td><div style="display:flex;gap:6px">
+          <button class="btn-sm btn-ghost" style="padding:5px 10px;font-size:12px" onclick="abrirEditarAula('${a.id}')">Editar</button>
+          <button class="btn-sm" style="background:rgba(239,68,68,.15);color:var(--red);border:none;padding:5px 10px;font-size:12px;border-radius:6px;cursor:pointer" onclick="deleteAula('${a.id}')">Excluir</button>
+        </div></td>
+      </tr>`).join('');
+  } catch(e){ console.error('Erro ao carregar aulas:',e); }
+}
+
+window.deleteAula = async function(id){
+  if(!confirm('Excluir esta aula?')) return;
+  await deleteDoc(doc(db,'aulas',id));
+  showToast('🗑️','Aula excluída!');
+  loadAulasFirebase();
+}
+
+// ── SALVAR QUIZ NO FIRESTORE ──
+window.salvarQuizFirebase = async function(){
+  const titulo = document.getElementById('quiz-titulo').value.trim();
+  const cursoId = document.getElementById('quiz-curso').value;
+  const tempo = document.getElementById('quiz-tempo').value.trim();
+  const nota = document.getElementById('quiz-nota').value.trim();
+  const ia = document.getElementById('quiz-ia').checked;
+  if(!titulo){ showToast('⚠️','Digite o título do quiz'); return; }
+  if(!cursoId){ showToast('⚠️','Selecione um curso'); return; }
+  try {
+    await addDoc(collection(db,'quizzes'),{
+      titulo, cursoId, tempo, notaMinima: nota, usarIA: ia,
+      questoes: 0, entregas: 0, criadoEm: serverTimestamp()
+    });
+    closeModal('modal-quiz');
+    showToast('❓','Quiz criado com sucesso!');
+    addLog('CRIAÇÃO',`Quiz: ${titulo}`, auth.currentUser?.email);
+    loadQuizzesFirebase();
+    ['quiz-titulo','quiz-tempo','quiz-nota'].forEach(id=>{
+      const el=document.getElementById(id); if(el) el.value='';
+    });
+  } catch(e){ showToast('❌','Erro ao salvar quiz.'); console.error(e); }
+}
+
+// ── CARREGAR QUIZZES DO FIRESTORE ──
+window.loadQuizzesFirebase = async function(){
+  try {
+    const snap = await getDocs(collection(db,'quizzes'));
+    const quizzes = [];
+    snap.forEach(d => quizzes.push({id:d.id,...d.data()}));
+    if(quizzes.length === 0) return;
+    const ql = document.getElementById('quizzes-list');
+    if(ql) ql.innerHTML = quizzes.map(q=>`
+      <div style="padding:14px 0;border-bottom:1px solid rgba(30,45,69,.4)">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <div>
+            <div style="font-weight:600;font-size:13.5px;margin-bottom:4px">${q.titulo}</div>
+            <div style="display:flex;gap:12px;font-size:12px;color:var(--text2)">
+              <span>⏱ ${q.tempo||'—'}</span>
+              <span>📋 Nota mínima: ${q.notaMinima||'—'}</span>
+              <span>${q.usarIA?'🤖 IA ativada':''}</span>
+            </div>
+          </div>
+          <button class="btn-sm" style="background:rgba(239,68,68,.15);color:var(--red);border:none;padding:5px 10px;font-size:11px;border-radius:6px;cursor:pointer" onclick="deleteQuiz('${q.id}')">Excluir</button>
+        </div>
+      </div>`).join('');
+  } catch(e){ console.error('Erro ao carregar quizzes:',e); }
+}
+
+window.deleteQuiz = async function(id){
+  if(!confirm('Excluir este quiz?')) return;
+  await deleteDoc(doc(db,'quizzes',id));
+  showToast('🗑️','Quiz excluído!');
+  loadQuizzesFirebase();
+}
+
+// ── EDITAR CURSO ──
+window.editCurso = async function(id){
+  try {
+    const snap = await getDocs(collection(db,'cursos'));
+    let curso = null;
+    snap.forEach(d => { if(d.id===id) curso={id:d.id,...d.data()}; });
+    if(!curso) return;
+    // Preencher o modal com os dados atuais
+    document.getElementById('curso-titulo').value = curso.titulo||'';
+    document.getElementById('curso-categoria').value = curso.categoria||'';
+    document.getElementById('curso-preco').value = curso.preco||'';
+    document.getElementById('curso-descricao').value = curso.descricao||'';
+    document.getElementById('curso-nivel').value = curso.nivel||'';
+    document.getElementById('curso-status').value = curso.status==='active'?'Publicado':'Rascunho';
+    // Mudar botão para atualizar
+    const btn = document.querySelector('#modal-curso .btn-accent');
+    btn.textContent = 'Atualizar Curso';
+    btn.onclick = () => atualizarCurso(id);
+    openModal('modal-curso');
+  } catch(e){ showToast('❌','Erro ao carregar curso.'); }
+}
+
+window.atualizarCurso = async function(id){
+  const titulo = document.getElementById('curso-titulo').value.trim();
+  const categoria = document.getElementById('curso-categoria').value;
+  const preco = document.getElementById('curso-preco').value;
+  const descricao = document.getElementById('curso-descricao').value.trim();
+  const nivel = document.getElementById('curso-nivel').value;
+  const status = document.getElementById('curso-status').value === 'Publicado' ? 'active' : 'inactive';
+  if(!titulo){ showToast('⚠️','Digite o título'); return; }
+  try {
+    await updateDoc(doc(db,'cursos',id),{ titulo, categoria, preco, descricao, nivel, status });
+    closeModal('modal-curso');
+    showToast('✅','Curso atualizado com sucesso!');
+    addLog('EDIÇÃO',`Curso: ${titulo}`, auth.currentUser?.email);
+    loadCursosFirebase();
+    // Restaurar botão
+    const btn = document.querySelector('#modal-curso .btn-accent');
+    btn.textContent = 'Criar Curso';
+    btn.onclick = () => salvarCursoFirebase();
+  } catch(e){ showToast('❌','Erro ao atualizar curso.'); console.error(e); }
+}
+
+// ── EDITAR AULA ──
+window.abrirEditarAula = async function(id){
+  try {
+    const snap = await getDocs(collection(db,'aulas'));
+    let aula = null;
+    snap.forEach(d => { if(d.id===id) aula={id:d.id,...d.data()}; });
+    if(!aula) return;
+    await popularSelectsCursos();
+    document.getElementById('aula-titulo').value = aula.titulo||'';
+    document.getElementById('aula-curso').value = aula.cursoId||'';
+    document.getElementById('aula-modulo').value = aula.modulo||'';
+    document.getElementById('aula-video').value = aula.videoUrl||'';
+    document.getElementById('aula-material').value = aula.material||'';
+    document.getElementById('aula-duracao').value = aula.duracao||'';
+    const btn = document.querySelector('#modal-aula .btn-accent');
+    btn.textContent = 'Atualizar Aula';
+    btn.onclick = async () => {
+      await updateDoc(doc(db,'aulas',id),{
+        titulo: document.getElementById('aula-titulo').value.trim(),
+        cursoId: document.getElementById('aula-curso').value,
+        modulo: document.getElementById('aula-modulo').value.trim(),
+        videoUrl: document.getElementById('aula-video').value.trim(),
+        material: document.getElementById('aula-material').value.trim(),
+        duracao: document.getElementById('aula-duracao').value.trim(),
+      });
+      closeModal('modal-aula');
+      showToast('✅','Aula atualizada!');
+      loadAulasFirebase();
+      btn.textContent='Salvar Aula'; btn.onclick=()=>salvarAulaFirebase();
+    };
+    openModal('modal-aula');
+  } catch(e){ showToast('❌','Erro ao carregar aula.'); }
+}
+
+// ── VIDEO UPLOAD ──
+function switchVideoTab(tab){
+  const isUpload = tab === 'upload';
+  document.getElementById('panel-upload').style.display = isUpload ? 'block' : 'none';
+  document.getElementById('panel-url').style.display   = isUpload ? 'none'  : 'block';
+  document.getElementById('tab-upload').style.background = isUpload ? 'var(--accent)'  : 'var(--surface2)';
+  document.getElementById('tab-upload').style.color     = isUpload ? '#fff'           : 'var(--text2)';
+  document.getElementById('tab-url').style.background   = isUpload ? 'var(--surface2)': 'var(--accent)';
+  document.getElementById('tab-url').style.color        = isUpload ? 'var(--text2)'   : '#fff';
+}
+
+function handleVideoSelect(input){
+  const file = input.files[0];
+  if(!file) return;
+  showVideoPreview(file);
+}
+
+function handleVideoDrop(e){
+  e.preventDefault();
+  document.getElementById('drop-zone').style.borderColor = 'var(--border)';
+  const file = e.dataTransfer.files[0];
+  if(!file || !file.type.startsWith('video/')) return showToast('⚠️','Selecione um arquivo de vídeo válido');
+  showVideoPreview(file);
+}
+
+function showVideoPreview(file){
+  const mb = (file.size / 1024 / 1024).toFixed(1);
+  document.getElementById('video-name').textContent = file.name;
+  document.getElementById('video-size').textContent = mb + ' MB · ' + file.type.split('/')[1].toUpperCase();
+  document.getElementById('video-preview').style.display = 'block';
+  document.getElementById('drop-zone').style.display = 'none';
+  // Progresso simulado
+  let pct = 0;
+  const bar = document.getElementById('upload-bar');
+  const pctEl = document.getElementById('upload-pct');
+  const timer = setInterval(()=>{
+    pct += Math.random() * 12;
+    if(pct >= 100){ pct = 100; clearInterval(timer);
+      pctEl.textContent = 'Pronto!';
+      pctEl.style.color = 'var(--green)';
+      showToast('🎬','Vídeo carregado com sucesso!');
+    } else {
+      pctEl.textContent = Math.round(pct) + '%';
+    }
+    bar.style.width = Math.min(pct,100) + '%';
+  }, 200);
+}
+
+function clearVideo(){
+  document.getElementById('video-preview').style.display = 'none';
+  document.getElementById('drop-zone').style.display = 'block';
+  document.getElementById('video-file-input').value = '';
+  document.getElementById('upload-bar').style.width = '0%';
+  document.getElementById('upload-pct').textContent = '0%';
+  document.getElementById('upload-pct').style.color = '';
+}
+
+// ── PWA ──
+if('serviceWorker' in navigator){
+  navigator.serviceWorker.register('sw.js').catch(()=>{});
+}
+</script>
+</body>
+</html>
